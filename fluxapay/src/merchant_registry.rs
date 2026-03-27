@@ -333,6 +333,59 @@ impl MerchantRegistry {
         }
     }
 
+    /// Get all registered merchants with pagination support
+    pub fn get_all_merchants(
+        env: Env,
+        offset: u32,
+        limit: u32,
+    ) -> Result<Vec<Merchant>, Error> {
+        let merchant_ids: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::MerchantList)
+            .unwrap_or_else(|| vec![&env]);
+
+        if limit == 0 {
+            return Ok(vec![&env]);
+        }
+
+        let mut result = vec![&env];
+        let start = offset as usize;
+        let end = core::cmp::min(merchant_ids.len(), start.saturating_add(limit as usize));
+
+        let mut i = start;
+        while i < end {
+            if let Some(merchant_id) = merchant_ids.get(i) {
+                if let Ok(merchant) = Self::get_merchant_internal(&env, &merchant_id) {
+                    result.push_back(merchant);
+                }
+            }
+            i += 1;
+        }
+
+        Ok(result)
+    }
+
+    /// Get all verified merchants (kyc_tier != Unverified)
+    pub fn get_verified_merchants(env: Env) -> Result<Vec<Merchant>, Error> {
+        let merchant_ids: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::MerchantList)
+            .unwrap_or_else(|| vec![&env]);
+
+        let mut result = vec![&env];
+        for merchant_id in merchant_ids.iter() {
+            if let Ok(merchant) = Self::get_merchant_internal(&env, &merchant_id) {
+                if merchant.kyc_tier != KycTier::Unverified {
+                    result.push_back(merchant);
+                }
+            }
+        }
+
+        Ok(result)
+    }
+
     fn get_merchant_internal(env: &Env, merchant_id: &Address) -> Result<Merchant, Error> {
         env.storage()
             .persistent()
