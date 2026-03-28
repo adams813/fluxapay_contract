@@ -139,6 +139,7 @@ pub enum DataKey {
     DisputeCounter,
     UsdcToken,
     Paused,
+    MerchantRegistryAddress,
 }
 
 const SHORT_LIVE_TTL: u32 = 120_960; // ~1 week at 5s/ledger
@@ -218,7 +219,7 @@ impl RefundManager {
                 amount,
                 currency,
                 deposit_address: env.current_contract_address(),
-                status: PaymentStatus::Pending,
+                status: PaymentStatus::Confirmed,
                 payer_address: None,
                 transaction_hash: None,
                 created_at: env.ledger().timestamp(),
@@ -258,11 +259,21 @@ impl RefundManager {
         }
 
         // Validate refund amount does not exceed original payment amount
-        let payment: PaymentCharge = env
+        // First try to get payment from local storage
+        let payment: PaymentCharge = if let Some(local_payment) = env
             .storage()
             .persistent()
-            .get(&DataKey::Payment(payment_id.clone()))
-            .ok_or(Error::PaymentNotFound)?;
+            .get::<DataKey, PaymentCharge>(&DataKey::Payment(payment_id.clone()))
+        {
+            local_payment
+        } else {
+            return Err(Error::PaymentNotFound);
+        };
+
+        // Issue #76: Reject refunds unless payment.status == Confirmed
+        if payment.status != PaymentStatus::Confirmed {
+            return Err(Error::PaymentAlreadyProcessed);
+        }
 
         // Sum existing refund amounts for this payment
         let existing_refunds = Self::get_payment_refunds_internal(env, &payment_id);
@@ -470,6 +481,49 @@ impl RefundManager {
 
         if amount <= 0 {
             return Err(Error::InvalidAmount);
+        }
+
+        // Issue #77: Load payment and cap dispute amount to confirmed payment amount
+        let payment: PaymentCharge = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Payment(payment_id.clone()))
+            .ok_or(Error::PaymentNotFound)?;
+
+        // Ensure payment is confirmed
+        if payment.status != PaymentStatus::Confirmed {
+            return Err(Error::PaymentAlreadyProcessed);
+        }
+
+        // Cap dispute amount to payment amount
+        if amount > payment.amount {
+            return Err(Error::InvalidAmount);
+        }
+
+        // Sum open disputes + prior refunds for the same payment_id
+        let existing_disputes = Self::get_payment_disputes_internal(&env, &payment_id);
+        let mut total_disputed: i128 = 0;
+        for id in existing_disputes.iter() {
+            if let Ok(d) = Self::get_dispute_internal(&env, &id) {
+                if d.status != DisputeStatus::Rejected {
+                    total_disputed += d.amount;
+                }
+            }
+        }
+
+        let existing_refunds = Self::get_payment_refunds_internal(&env, &payment_id);
+        let mut total_refunded: i128 = 0;
+        for id in existing_refunds.iter() {
+            if let Ok(r) = Self::get_refund_internal(&env, &id) {
+                if r.status != RefundStatus::Rejected {
+                    total_refunded += r.amount;
+                }
+            }
+        }
+
+        // Ensure totals stay within payment.amount
+        if total_disputed + total_refunded + amount > payment.amount {
+            return Err(Error::RefundExceedsPayment);
         }
 
         let counter = Self::get_next_dispute_id(&env);
@@ -749,6 +803,24 @@ impl PaymentProcessor {
         env.storage().persistent().set(&DataKey::Paused, &false);
     }
 
+    pub fn set_merchant_registry_address(
+        env: Env,
+        admin: Address,
+        registry_address: Address,
+    ) -> Result<(), Error> {
+        admin.require_auth();
+
+        if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
+            return Err(Error::Unauthorized);
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::MerchantRegistryAddress, &registry_address);
+
+        Ok(())
+    }
+
     pub fn grant_role(
         env: Env,
         admin: Address,
@@ -820,6 +892,27 @@ impl PaymentProcessor {
         // Verify that the merchant has the MERCHANT role (granted on verification)
         if !AccessControl::has_role(&env, &role_merchant(&env), &merchant_id) {
             return Err(Error::Unauthorized);
+        }
+
+        // Issue #79: Cross-contract validate merchant is verified and active
+        if let Some(registry_address) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, Address>(&DataKey::MerchantRegistryAddress)
+        {
+            let registry_client = crate::merchant_registry::MerchantRegistryClient::new(&env, &registry_address);
+            match registry_client.try_get_merchant(&merchant_id) {
+                Ok(Ok(merchant)) => {
+                    // Require merchant to be verified (not Unverified) and active
+                    if merchant.kyc_tier == crate::merchant_registry::KycTier::Unverified || !merchant.active {
+                        return Err(Error::Unauthorized);
+                    }
+                }
+                _ => {
+                    // If registry lookup fails, reject the payment
+                    return Err(Error::Unauthorized);
+                }
+            }
         }
 
         if amount <= 0 {
@@ -898,6 +991,13 @@ impl PaymentProcessor {
 
         let mut payment = Self::get_payment_internal(&env, &payment_id)?;
 
+        // Issue #75: Enforce idempotent verify_payment - reject double verification
+        // If payment is already Confirmed, return current status without error
+        if payment.status == PaymentStatus::Confirmed {
+            return Ok(payment.status);
+        }
+
+        // Reject if payment is in any other terminal state
         if payment.status != PaymentStatus::Pending {
             return Err(Error::PaymentAlreadyProcessed);
         }
