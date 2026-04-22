@@ -405,3 +405,96 @@ fn test_verified_merchant_can_create_payment() {
     assert_eq!(payment.merchant_id, merchant);
     assert_eq!(payment.amount, amount);
 }
+
+#[test]
+fn test_suspend_merchant() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(MerchantRegistry, ());
+    let client = MerchantRegistryClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let merchant_id = Address::generate(&env);
+
+    client.initialize(&admin);
+
+    client.register_merchant(
+        &merchant_id,
+        &String::from_str(&env, "Merchant"),
+        &String::from_str(&env, "USDC"),
+        &None,
+        &None,
+    );
+
+    let reason = String::from_str(&env, "Fraudulent activity");
+    client.suspend_merchant(&admin, &merchant_id, &reason);
+
+    let merchant = client.get_merchant(&merchant_id);
+    assert!(!merchant.active);
+    assert_eq!(merchant.suspension_reason, Some(reason));
+    assert!(merchant.suspended_at.is_some());
+}
+
+#[test]
+fn test_reinstate_merchant() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(MerchantRegistry, ());
+    let client = MerchantRegistryClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let merchant_id = Address::generate(&env);
+
+    client.initialize(&admin);
+
+    client.register_merchant(
+        &merchant_id,
+        &String::from_str(&env, "Merchant"),
+        &String::from_str(&env, "USDC"),
+        &None,
+        &None,
+    );
+
+    let reason = String::from_str(&env, "Fraudulent activity");
+    client.suspend_merchant(&admin, &merchant_id, &reason);
+    
+    // Check it's suspended
+    let suspended = client.get_merchant(&merchant_id);
+    assert!(!suspended.active);
+
+    client.reinstate_merchant(&admin, &merchant_id);
+
+    let reinstated = client.get_merchant(&merchant_id);
+    assert!(reinstated.active);
+    assert_eq!(reinstated.suspension_reason, None);
+    assert_eq!(reinstated.suspended_at, None);
+}
+
+#[test]
+#[should_panic(expected = "HostError: Error(Contract, #3)")]
+fn test_suspend_merchant_unauthorized() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(MerchantRegistry, ());
+    let client = MerchantRegistryClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let attacker = Address::generate(&env);
+    let merchant_id = Address::generate(&env);
+
+    client.initialize(&admin);
+
+    client.register_merchant(
+        &merchant_id,
+        &String::from_str(&env, "Merchant"),
+        &String::from_str(&env, "USDC"),
+        &None,
+        &None,
+    );
+
+    client.suspend_merchant(&attacker, &merchant_id, &String::from_str(&env, "Reason"));
+}
+
