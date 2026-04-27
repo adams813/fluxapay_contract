@@ -131,6 +131,7 @@ pub enum Error {
     RefundExceedsPayment = 16,
     ContractPaused = 17,
     RateLimitExceeded = 18,
+    RefundCancelled = 19,
 }
 
 #[contracttype]
@@ -439,6 +440,49 @@ impl RefundManager {
         // Issue #27: emit REFUND/REJECTED event
         env.events().publish(
             (Symbol::new(&env, "REFUND"), Symbol::new(&env, "REJECTED")),
+            (refund.payment_id, refund_id, refund.amount),
+        );
+
+        Ok(())
+    }
+
+    /// Cancel a pending refund. Caller must be the refund requester (merchant) or contract admin.
+    /// Removes the refund from the payment's pending list and emits REFUND/CANCELLED.
+    pub fn cancel_refund(env: Env, caller: Address, refund_id: String) -> Result<(), Error> {
+        caller.require_auth();
+
+        let refund = Self::get_refund_internal(&env, &refund_id)?;
+
+        if refund.status != RefundStatus::Pending {
+            return Err(Error::RefundAlreadyProcessed);
+        }
+
+        let is_requester = caller == refund.requester;
+        let is_admin = AccessControl::has_role(&env, &role_admin(&env), &caller);
+        if !is_requester && !is_admin {
+            return Err(Error::Unauthorized);
+        }
+
+        // Remove from payment's refund list
+        let existing = Self::get_payment_refunds_internal(&env, &refund.payment_id);
+        let mut updated = vec![&env];
+        for id in existing.iter() {
+            if id != refund_id {
+                updated.push_back(id);
+            }
+        }
+        env.storage().persistent().set(
+            &DataKey::PaymentRefunds(refund.payment_id.clone()),
+            &updated,
+        );
+
+        // Remove the refund record
+        env.storage()
+            .persistent()
+            .remove(&DataKey::Refund(refund_id.clone()));
+
+        env.events().publish(
+            (Symbol::new(&env, "REFUND"), Symbol::new(&env, "CANCELLED")),
             (refund.payment_id, refund_id, refund.amount),
         );
 

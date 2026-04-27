@@ -769,3 +769,108 @@ fn test_admin_in_role_members_after_init() {
     assert_eq!(members.len(), 1);
     assert_eq!(members.get(0), Some(admin));
 }
+
+#[test]
+fn test_cancel_refund_by_requester() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_, client) = setup_refund_manager(&env);
+
+    let payment_id = String::from_str(&env, "payment_cancel_1");
+    let merchant_id = Address::generate(&env);
+    let requester = Address::generate(&env);
+
+    client.register_payment(&payment_id, &merchant_id, &5000i128, &Symbol::new(&env, "USDC"));
+    let refund_id = client.create_refund(&payment_id, &1000i128, &String::from_str(&env, "cancel me"), &requester);
+
+    client.cancel_refund(&requester, &refund_id);
+
+    // Refund record should be gone
+    let result = client.try_get_refund(&refund_id);
+    assert_eq!(result, Err(Ok(Error::RefundNotFound)));
+
+    // Payment refund list should be empty
+    let refunds = client.get_payment_refunds(&payment_id).unwrap();
+    assert_eq!(refunds.len(), 0);
+}
+
+#[test]
+fn test_cancel_refund_by_admin() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_refund_manager(&env);
+
+    let payment_id = String::from_str(&env, "payment_cancel_2");
+    let merchant_id = Address::generate(&env);
+    let requester = Address::generate(&env);
+
+    client.register_payment(&payment_id, &merchant_id, &5000i128, &Symbol::new(&env, "USDC"));
+    let refund_id = client.create_refund(&payment_id, &500i128, &String::from_str(&env, "admin cancel"), &requester);
+
+    client.cancel_refund(&admin, &refund_id);
+
+    let result = client.try_get_refund(&refund_id);
+    assert_eq!(result, Err(Ok(Error::RefundNotFound)));
+}
+
+#[test]
+fn test_cancel_refund_unauthorized() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_, client) = setup_refund_manager(&env);
+
+    let payment_id = String::from_str(&env, "payment_cancel_3");
+    let merchant_id = Address::generate(&env);
+    let requester = Address::generate(&env);
+
+    client.register_payment(&payment_id, &merchant_id, &5000i128, &Symbol::new(&env, "USDC"));
+    let refund_id = client.create_refund(&payment_id, &500i128, &String::from_str(&env, "reason"), &requester);
+
+    let random = Address::generate(&env);
+    let result = client.try_cancel_refund(&random, &refund_id);
+    assert_eq!(result, Err(Ok(Error::Unauthorized)));
+}
+
+#[test]
+fn test_cancel_refund_already_processed() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_refund_manager(&env);
+
+    let payment_id = String::from_str(&env, "payment_cancel_4");
+    let merchant_id = Address::generate(&env);
+    let requester = Address::generate(&env);
+
+    client.register_payment(&payment_id, &merchant_id, &5000i128, &Symbol::new(&env, "USDC"));
+    let refund_id = client.create_refund(&payment_id, &500i128, &String::from_str(&env, "reason"), &requester);
+
+    let operator = Address::generate(&env);
+    client.grant_role(&admin, &role_settlement_operator(&env), &operator);
+    client.process_refund(&operator, &refund_id);
+
+    // Attempt to cancel a completed refund
+    let result = client.try_cancel_refund(&requester, &refund_id);
+    assert_eq!(result, Err(Ok(Error::RefundAlreadyProcessed)));
+}
+
+#[test]
+fn test_cancel_refund_emits_event() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_, client) = setup_refund_manager(&env);
+
+    let payment_id = String::from_str(&env, "payment_cancel_5");
+    let merchant_id = Address::generate(&env);
+    let requester = Address::generate(&env);
+
+    client.register_payment(&payment_id, &merchant_id, &5000i128, &Symbol::new(&env, "USDC"));
+    let refund_id = client.create_refund(&payment_id, &750i128, &String::from_str(&env, "reason"), &requester);
+
+    client.cancel_refund(&requester, &refund_id);
+
+    let events = env.events().all();
+    let last = events.last().unwrap();
+    let topics = last.1;
+    assert_eq!(topics.get(0).unwrap(), Symbol::new(&env, "REFUND").into_val(&env));
+    assert_eq!(topics.get(1).unwrap(), Symbol::new(&env, "CANCELLED").into_val(&env));
+}
