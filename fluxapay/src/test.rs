@@ -107,6 +107,67 @@ fn test_create_payment_rate_limit_enforced() {
 }
 
 #[test]
+fn test_cancel_multiple_streams_for_sender() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_admin, client) = setup_payment_processor(&env);
+
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let stream_id1 = String::from_str(&env, "stream_1");
+    let stream_id2 = String::from_str(&env, "stream_2");
+
+    assert_eq!(client.create_stream(&sender, &stream_id1, &recipient, &100i128), Ok(()));
+    assert_eq!(client.create_stream(&sender, &stream_id2, &recipient, &200i128), Ok(()));
+
+    let stream_ids = vec![&env, stream_id1.clone(), stream_id2.clone()];
+    let cancelled = client.cancel_multiple_streams(&sender, &stream_ids).unwrap();
+
+    assert_eq!(cancelled.len(), 2);
+    let stream1 = client.get_stream(&stream_id1).unwrap();
+    let stream2 = client.get_stream(&stream_id2).unwrap();
+    assert_eq!(stream1.status, StreamStatus::Cancelled);
+    assert_eq!(stream2.status, StreamStatus::Cancelled);
+}
+
+#[test]
+fn test_batch_withdraw_to_custom_routing() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_admin, client) = setup_payment_processor(&env);
+
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let destination1 = Address::generate(&env);
+    let destination2 = Address::generate(&env);
+    let stream_id1 = String::from_str(&env, "stream_a");
+    let stream_id2 = String::from_str(&env, "stream_b");
+
+    assert_eq!(client.create_stream(&sender, &stream_id1, &recipient, &100i128), Ok(()));
+    assert_eq!(client.create_stream(&sender, &stream_id2, &recipient, &200i128), Ok(()));
+
+    let withdrawal1 = WithdrawalTo {
+        stream_id: stream_id1.clone(),
+        destination: destination1.clone(),
+        amount: 40,
+    };
+    let withdrawal2 = WithdrawalTo {
+        stream_id: stream_id2.clone(),
+        destination: destination2.clone(),
+        amount: 150,
+    };
+    let withdrawals = vec![&env, withdrawal1, withdrawal2];
+
+    let success = client.batch_withdraw_to(&recipient, &withdrawals).unwrap();
+    assert_eq!(success.len(), 2);
+
+    let stream1 = client.get_stream(&stream_id1).unwrap();
+    let stream2 = client.get_stream(&stream_id2).unwrap();
+    assert_eq!(stream1.amount, 60);
+    assert_eq!(stream2.amount, 50);
+}
+
+#[test]
 fn test_verify_payment_success() {
     let env = Env::default();
     env.mock_all_auths();
