@@ -18,6 +18,8 @@ pub struct PaymentLink {
     /// If true, funds are transferred directly to the merchant wallet on use_link,
     /// bypassing the escrow/platform wallet (issue #111).
     pub direct_transfer: bool,
+    /// Optional metadata attached to this payment link.
+    pub metadata: Option<Map<String, String>>,
 }
 
 #[contracttype]
@@ -46,6 +48,7 @@ impl PaymentLinkManager {
         expires_at: Option<u64>,
         max_uses: Option<u32>,
         direct_transfer: bool,
+        metadata: Option<Map<String, String>>,
     ) -> String {
         merchant.require_auth();
 
@@ -60,6 +63,7 @@ impl PaymentLinkManager {
             use_count: 0,
             active: true,
             direct_transfer,
+            metadata,
         };
 
         env.storage()
