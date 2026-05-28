@@ -1035,6 +1035,8 @@ impl PaymentStreaming {
         );
 
         Ok(())
+    }
+
     /// Cancel up to `MAX_BATCH_CANCEL` streams in a single transaction, skipping
     /// streams that are not active or not owned by `sender` instead of aborting.
     /// Returns the list of successfully cancelled stream IDs.
