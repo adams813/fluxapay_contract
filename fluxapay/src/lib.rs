@@ -3704,6 +3704,21 @@ impl PaymentProcessor {
     pub fn close_expired_stream(env: Env, stream_id: String) -> Result<(), StreamError> {
         PaymentStreaming::close_expired_stream(env, stream_id)
     }
+
+    /// Set the platform fee in basis points applied to stream withdrawals.
+    /// Only the admin may call this.
+    pub fn set_stream_fee_bps(env: Env, admin: Address, fee_bps: i128) -> Result<(), Error> {
+        admin.require_auth();
+        if AccessControl::get_admin(&env) != Some(admin) {
+            return Err(Error::AccessControlError);
+        }
+        PaymentStreaming::set_stream_fee_bps(env, fee_bps);
+        Ok(())
+    }
+
+    pub fn get_stream_fee_bps(env: Env) -> i128 {
+        PaymentStreaming::get_stream_fee_bps(env)
+    }
 }
 
 #[cfg(test)]
