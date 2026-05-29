@@ -59,6 +59,7 @@ pub struct PaymentStream {
 #[contracttype]
 pub enum StreamDataKey {
     Stream(String),
+    StreamFeeBps,
 }
 
 #[contracttype]
@@ -127,6 +128,22 @@ fn require_not_paused(env: &Env) -> Result<(), StreamError> {
     Ok(())
 }
 
+fn get_stream_fee_bps(env: &Env) -> i128 {
+    env.storage()
+        .persistent()
+        .get(&StreamDataKey::StreamFeeBps)
+        .unwrap_or(0i128)
+}
+
+/// Compute fee and net amounts: returns (fee, net).
+fn apply_fee(amount: i128, fee_bps: i128) -> (i128, i128) {
+    if fee_bps <= 0 {
+        return (0, amount);
+    }
+    let fee = amount * fee_bps / 10_000;
+    (fee, amount - fee)
+}
+
 fn get_sender_stream_count(env: &Env, sender: &Address) -> u32 {
     env.storage()
         .persistent()
@@ -188,6 +205,18 @@ impl PaymentStreaming {
     /// Contract version bump helper.
     pub fn version() -> u32 {
         1
+    }
+
+    /// Set the platform fee in basis points applied to stream withdrawals.
+    /// Admin auth is enforced by the caller (PaymentProcessor).
+    pub fn set_stream_fee_bps(env: Env, fee_bps: i128) {
+        env.storage()
+            .persistent()
+            .set(&StreamDataKey::StreamFeeBps, &fee_bps);
+    }
+
+    pub fn get_stream_fee_bps(env: Env) -> i128 {
+        get_stream_fee_bps(&env)
     }
 
     // ─── Stream creation ──────────────────────────────────────────────────────
@@ -599,7 +628,14 @@ impl PaymentStreaming {
                 // Reentrancy guard: lock acquired after state is persisted
                 acquire_lock(&env, &stream_id)?;
                 let token_client = token::Client::new(&env, &stream.token);
-                token_client.transfer(&env.current_contract_address(), &recipient, &withdrawable);
+                let fee_bps = get_stream_fee_bps(&env);
+                let (fee, net) = apply_fee(withdrawable, fee_bps);
+                if fee > 0 {
+                    if let Some(admin) = crate::access_control::AccessControl::get_admin(&env) {
+                        token_client.transfer(&env.current_contract_address(), &admin, &fee);
+                    }
+                }
+                token_client.transfer(&env.current_contract_address(), &recipient, &net);
                 release_lock(&env, &stream_id);
 
                 env.events().publish(
@@ -608,7 +644,7 @@ impl PaymentStreaming {
                         Symbol::new(&env, "WITHDRAWN"),
                         stream_id.clone(),
                     ),
-                    (recipient.clone(), recipient.clone(), withdrawable),
+                    (recipient.clone(), recipient.clone(), withdrawable, stream.remaining_deposit),
                 );
 
                 processed.push_back(stream_id);
@@ -679,7 +715,14 @@ impl PaymentStreaming {
             .set(&StreamDataKey::Stream(stream_id.clone()), &stream);
 
         let token_client = token::Client::new(&env, &stream.token);
-        token_client.transfer(&env.current_contract_address(), &destination, &withdrawable);
+        let fee_bps = get_stream_fee_bps(&env);
+        let (fee, net) = apply_fee(withdrawable, fee_bps);
+        if fee > 0 {
+            if let Some(admin) = crate::access_control::AccessControl::get_admin(&env) {
+                token_client.transfer(&env.current_contract_address(), &admin, &fee);
+            }
+        }
+        token_client.transfer(&env.current_contract_address(), &destination, &net);
 
         release_lock(&env, &stream_id);
 
@@ -689,7 +732,7 @@ impl PaymentStreaming {
                 Symbol::new(&env, "WITHDRAWN"),
                 stream_id.clone(),
             ),
-            (stream.receiver.clone(), destination.clone(), withdrawable),
+            (stream.receiver.clone(), destination.clone(), withdrawable, stream.remaining_deposit),
         );
 
         Ok(stream_id)
@@ -1035,6 +1078,8 @@ impl PaymentStreaming {
         );
 
         Ok(())
+    }
+
     /// Cancel up to `MAX_BATCH_CANCEL` streams in a single transaction, skipping
     /// streams that are not active or not owned by `sender` instead of aborting.
     /// Returns the list of successfully cancelled stream IDs.
@@ -1174,10 +1219,17 @@ impl PaymentStreaming {
 
             // Interaction
             let token_client = token::Client::new(&env, &stream.token);
+            let fee_bps = get_stream_fee_bps(&env);
+            let (fee, net) = apply_fee(withdrawable, fee_bps);
+            if fee > 0 {
+                if let Some(admin) = crate::access_control::AccessControl::get_admin(&env) {
+                    token_client.transfer(&env.current_contract_address(), &admin, &fee);
+                }
+            }
             token_client.transfer(
                 &env.current_contract_address(),
                 &w.destination,
-                &withdrawable,
+                &net,
             );
 
             env.events().publish(
@@ -1186,7 +1238,7 @@ impl PaymentStreaming {
                     Symbol::new(&env, "WITHDRAWN"),
                     w.stream_id.clone(),
                 ),
-                (recipient.clone(), w.destination.clone(), withdrawable),
+                (recipient.clone(), w.destination.clone(), withdrawable, stream.remaining_deposit),
             );
 
             processed.push_back(w.stream_id.clone());

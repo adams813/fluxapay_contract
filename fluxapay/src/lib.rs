@@ -13,11 +13,24 @@ const CREATE_PAYMENT_WINDOW_SECS: u64 = 60;
 const CREATE_PAYMENT_MAX_PER_WINDOW: u32 = 30;
 pub const DEFAULT_PAYMENT_DURATION_SECS: u64 = 3_600;
 const REFUND_FEE_BPS: i128 = 100;
+/// Cooldown period after payment confirmation before refunds can be requested (5 minutes in seconds).
+const REFUND_COOLDOWN_SECS: u64 = 300;
+/// Default refund request expiry period (30 days in seconds).
+const REFUND_EXPIRY_SECS: u64 = 30 * 24 * 60 * 60;
+/// Minimum number of arbitrators required for dispute resolution voting.
+const ARBITRATOR_VOTING_THRESHOLD: u32 = 3;
 
 // Issue #167: Tiered refund fees based on merchant KYC tier
 const REFUND_FEE_BPS_BASIC: i128 = 100;     // 1.0% for Basic tier
 const REFUND_FEE_BPS_FULL: i128 = 80;       // 0.8% for Full tier
 const REFUND_FEE_BPS_BUSINESS: i128 = 50;   // 0.5% for Business tier
+
+// Issue #63: Monthly processing volume caps per KYC tier (in USDC stroops, 7 decimals)
+// Unverified: $500, Basic: $10,000, Full: $100,000, Business: unlimited (i128::MAX)
+const TIER_CAP_UNVERIFIED: i128 = 5_000_000_000;       // $500
+const TIER_CAP_BASIC: i128 = 100_000_000_000;           // $10,000
+const TIER_CAP_FULL: i128 = 1_000_000_000_000;          // $100,000
+const TIER_CAP_BUSINESS: i128 = i128::MAX;              // unlimited
 
 /// Maximum number of payment retries before a subscription is cancelled.
 pub const SUBSCRIPTION_MAX_RETRIES: u32 = 3;
@@ -31,7 +44,7 @@ mod dex_router;
 pub mod fx_oracle;
 pub mod merchant_auth;
 use access_control::{
-    role_admin, role_merchant, role_oracle, role_settlement_operator, AccessControl,
+    role_admin, role_merchant, role_oracle, role_settlement_operator, role_arbitrator, AccessControl,
 };
 // Re-export for tests
 #[allow(unused_imports)]
@@ -105,6 +118,10 @@ pub struct Refund {
     pub processed_at: Option<u64>,
     /// Issue #168: Approved by operator, allowing customer to claim.
     pub approved: bool,
+    /// Cryptographic proof hash of return agreement for off-chain verification (Issue #176).
+    pub receipt_hash: Option<BytesN<32>>,
+    /// Expiry timestamp for refund requests (Issue #170).
+    pub expiry_at: u64,
 }
 
 #[contracttype]
@@ -144,6 +161,25 @@ pub struct Dispute {
     pub escalated: bool,
     /// Issue #177: Computed deadline in seconds (3 days for small, 7 days for large).
     pub computed_deadline_secs: Option<u64>,
+    /// Multi-party payout splits for marketplace dispute resolution.
+    pub payout_splits: Vec<SettlementSplit>,
+}
+
+/// Arbitrator vote on a dispute resolution (Issue #178).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ArbitratorVoteChoice {
+    Approve,
+    Reject,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ArbitratorVote {
+    pub dispute_id: String,
+    pub arbitrator: Address,
+    pub vote: ArbitratorVoteChoice,
+    pub voted_at: u64,
 }
 
 #[contracterror]
@@ -186,6 +222,20 @@ pub enum Error {
     InvalidResumeTimestamp = 32,
     /// Merchant authorization error (see MerchantAuthError for details).
     MerchantAuthError = 33,
+    /// Merchant has exceeded their KYC tier monthly processing volume cap.
+    TierVolumeLimitExceeded = 34,
+    /// Refund requested before cooldown period elapsed.
+    RefundCooldownNotElapsed = 34,
+    /// Refund request has expired and cannot be processed.
+    RefundExpired = 35,
+    /// Insufficient arbitrators available for voting.
+    InsufficientArbitrators = 36,
+    /// Voting threshold not met for dispute resolution.
+    ArbitrationVotingThresholdNotMet = 37,
+    /// Fee proposal has not matured for the required 7 days.
+    FeeProposalNotReady = 38,
+    /// No active fee proposal found.
+    NoFeeProposal = 39,
 }
 
 #[contracttype]
@@ -425,6 +475,13 @@ pub struct WithdrawalRecipient {
 }
 
 #[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FeeProposal {
+    pub proposed_fee: i128,
+    pub proposed_at: u64,
+}
+
+#[contracttype]
 pub enum DataKey {
     Payment(String),
     MerchantPayments(Address),
@@ -451,6 +508,10 @@ pub enum DataKey {
     StreamCounter,
     /// Stores operator notes keyed by dispute_id for on-chain transparency.
     DisputeOperatorNote(String),
+    /// Stores arbitrator vote on a dispute (keyed by (dispute_id, arbitrator)).
+    ArbitratorVote(String, Address),
+    /// Stores all arbitrators who have voted on a dispute.
+    DisputeArbitratorVotes(String),
     /// Locked stake for a dispute arbitrator: (dispute_id, arbitrator) → amount
     DisputeStake(String, Address),
     /// Vote cast by an arbitrator: (dispute_id, arbitrator) → VoteChoice
@@ -459,6 +520,10 @@ pub enum DataKey {
     DisputeVoteTally(String),
     /// Issue #168: Fee split configuration (treasury_bps, developer_bps, treasury_addr, developer_addr)
     FeeSplitConfig,
+    /// Monthly volume tracker: (merchant_id, month_epoch) → i128 cumulative amount
+    MerchantMonthlyVolume(Address, u32),
+    FeeProposal,
+    CurrentFee,
 }
 
 // When building for WASM deployment, only the active contract's #[contractimpl]
@@ -599,6 +664,42 @@ impl RefundManager {
         AccessControl::get_role_members(&env, &role)
     }
 
+    pub fn propose_fee_update(env: Env, admin: Address, new_fee: i128) -> Result<(), Error> {
+        admin.require_auth();
+        if Some(admin.clone()) != AccessControl::get_admin(&env) {
+            return Err(Error::Unauthorized);
+        }
+        let proposal = FeeProposal {
+            proposed_fee: new_fee,
+            proposed_at: env.ledger().timestamp(),
+        };
+        env.storage().persistent().set(&DataKey::FeeProposal, &proposal);
+        Ok(())
+    }
+
+    pub fn finalize_fee_update(env: Env, admin: Address) -> Result<(), Error> {
+        admin.require_auth();
+        if Some(admin.clone()) != AccessControl::get_admin(&env) {
+            return Err(Error::Unauthorized);
+        }
+        let proposal: FeeProposal = env
+            .storage()
+            .persistent()
+            .get(&DataKey::FeeProposal)
+            .ok_or(Error::NoFeeProposal)?;
+
+        let now = env.ledger().timestamp();
+        let seven_days_secs: u64 = 7 * 24 * 60 * 60;
+        if now < proposal.proposed_at + seven_days_secs {
+            return Err(Error::FeeProposalNotReady);
+        }
+
+        env.storage().persistent().set(&DataKey::CurrentFee, &proposal.proposed_fee);
+        env.storage().persistent().remove(&DataKey::FeeProposal);
+
+        Ok(())
+    }
+
     /// Register a payment with the refund manager so refund amounts can be validated.
     pub fn register_payment(
         env: Env,
@@ -645,9 +746,10 @@ impl RefundManager {
         refund_amount: i128,
         reason: String,
         requester: Address,
+        receipt_hash: Option<BytesN<32>>,
     ) -> Result<String, Error> {
         requester.require_auth();
-        Self::create_refund_internal(&env, payment_id, refund_amount, reason, requester)
+        Self::create_refund_internal(&env, payment_id, refund_amount, reason, requester, receipt_hash)
     }
 
     fn create_refund_internal(
@@ -656,6 +758,7 @@ impl RefundManager {
         refund_amount: i128,
         reason: String,
         requester: Address,
+        receipt_hash: Option<BytesN<32>>,
     ) -> Result<String, Error> {
         if refund_amount <= 0 {
             return Err(Error::InvalidAmount);
@@ -676,6 +779,13 @@ impl RefundManager {
         // Issue #76: Reject refunds unless payment.status == Confirmed
         if payment.status != PaymentStatus::Confirmed {
             return Err(Error::PaymentAlreadyProcessed);
+        }
+
+        // Issue #174: Check cooldown period after payment confirmation
+        let confirmed_at = payment.confirmed_at.ok_or(Error::PaymentAlreadyProcessed)?;
+        let now = env.ledger().timestamp();
+        if now < confirmed_at + REFUND_COOLDOWN_SECS {
+            return Err(Error::RefundCooldownNotElapsed);
         }
 
         // Sum existing refund amounts for this payment
@@ -700,6 +810,9 @@ impl RefundManager {
         // we use a match statement for common cases
         let refund_id = format_id(env, "refund_", counter);
 
+        // Issue #170: Set expiry timestamp (30 days from now)
+        let expiry_at = now + REFUND_EXPIRY_SECS;
+
         let refund = Refund {
             refund_id: refund_id.clone(),
             payment_id: payment_id.clone(),
@@ -710,6 +823,8 @@ impl RefundManager {
             created_at: env.ledger().timestamp(),
             processed_at: None,
             approved: false,
+            receipt_hash,
+            expiry_at,
         };
 
         env.storage()
@@ -760,7 +875,7 @@ impl RefundManager {
 
     fn process_refund_internal(
         env: &Env,
-        _operator: &Address,
+        operator: &Address,
         refund_id: String,
     ) -> Result<(), Error> {
         let mut refund = Self::get_refund_internal(env, &refund_id)?;
@@ -769,6 +884,20 @@ impl RefundManager {
             return Err(Error::RefundAlreadyProcessed);
         }
 
+        // Issue #170: Check refund expiration
+        let now = env.ledger().timestamp();
+        if now > refund.expiry_at {
+            return Err(Error::RefundExpired);
+        }
+
+        let usdc_token_address: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::UsdcToken)
+            .ok_or(Error::Unauthorized)?;
+        let token_client = token::TokenClient::new(env, &usdc_token_address);
+
+        // Issue #167: Query merchant's KYC tier and apply tiered refund fee
         let payment: PaymentCharge = env
             .storage()
             .persistent()
@@ -776,6 +905,12 @@ impl RefundManager {
             .ok_or(Error::PaymentNotFound)?;
 
         // Issue #167: Query merchant's KYC tier and apply tiered refund fee
+        let default_fee_bps = env
+            .storage()
+            .persistent()
+            .get(&DataKey::CurrentFee)
+            .unwrap_or(REFUND_FEE_BPS);
+
         let fee_bps = if let Some(registry_address) = env
             .storage()
             .persistent()
@@ -790,13 +925,13 @@ impl RefundManager {
                         KycTier::Business => REFUND_FEE_BPS_BUSINESS,
                         KycTier::Full => REFUND_FEE_BPS_FULL,
                         KycTier::Basic => REFUND_FEE_BPS_BASIC,
-                        KycTier::Unverified => REFUND_FEE_BPS, // Default 1%
+                        KycTier::Unverified => default_fee_bps, // Default 1% dynamically updated
                     }
                 }
-                _ => REFUND_FEE_BPS, // Default if registry lookup fails
+                _ => default_fee_bps, // Default if registry lookup fails
             }
         } else {
-            REFUND_FEE_BPS // Default if no registry configured
+            default_fee_bps // Default if no registry configured
         };
 
         let fee = refund.amount * fee_bps / 10_000;
@@ -890,6 +1025,9 @@ impl RefundManager {
                     let admin_muxed: MuxedAddress = (&admin).into();
                     let _ = token_client.try_transfer(&from, &admin_muxed, &fee);
                 }
+            if let Some(admin) = AccessControl::get_admin(env) {
+                let admin_muxed: MuxedAddress = (&admin).into();
+                let _ = token_client.try_transfer(&from, &admin_muxed, &admin_fee);
             }
         }
         
@@ -1031,7 +1169,12 @@ impl RefundManager {
             .ok_or(Error::Unauthorized)?;
         let token_client = token::TokenClient::new(&env, &usdc_token_address);
 
-        let fee = refund_amount * REFUND_FEE_BPS / 10_000;
+        let default_fee_bps = env
+            .storage()
+            .persistent()
+            .get(&DataKey::CurrentFee)
+            .unwrap_or(REFUND_FEE_BPS);
+        let fee = refund_amount * default_fee_bps / 10_000;
         let net_amount = refund_amount - fee;
 
         let mut refund = Self::get_refund_internal(&env, &refund_id)?;
@@ -1154,6 +1297,7 @@ impl RefundManager {
         reason: String,
         evidence: String,
         disputer: Address,
+        payout_splits: Vec<SettlementSplit>,
     ) -> Result<String, Error> {
         disputer.require_auth();
 
@@ -1230,6 +1374,7 @@ impl RefundManager {
             review_deadline: None,
             escalated: false,
             computed_deadline_secs: Some(deadline_secs),
+            payout_splits,
         };
 
         env.storage()
@@ -1384,6 +1529,7 @@ impl RefundManager {
             dispute.amount,
             refund_reason,
             dispute.disputer.clone(),
+            None,
         )?;
 
         // Process the refund immediately
@@ -1835,6 +1981,104 @@ impl RefundManager {
             }
         }
         Ok(disputes)
+    }
+
+    /// Issue #178: Submit an arbitrator vote on a dispute resolution.
+    pub fn submit_arbitrator_vote(
+        env: Env,
+        dispute_id: String,
+        arbitrator: Address,
+        vote: ArbitratorVoteChoice,
+    ) -> Result<(), Error> {
+        arbitrator.require_auth();
+
+        // Check if arbitrator has the ARBITRATOR role
+        if !AccessControl::has_role(&env, &role_arbitrator(&env), &arbitrator) {
+            return Err(Error::Unauthorized);
+        }
+
+        let dispute = Self::get_dispute_internal(&env, &dispute_id)?;
+
+        // Only allow voting on Open disputes
+        if dispute.status != DisputeStatus::Open {
+            return Err(Error::DisputeAlreadyResolved);
+        }
+
+        // Check if arbitrator has already voted
+        let vote_key = DataKey::ArbitratorVote(dispute_id.clone(), arbitrator.clone());
+        if env.storage().persistent().has(&vote_key) {
+            return Err(Error::InvalidAmount); // Reusing error code for "already voted"
+        }
+
+        // Record the vote
+        let arbitrator_vote = ArbitratorVote {
+            dispute_id: dispute_id.clone(),
+            arbitrator: arbitrator.clone(),
+            vote: vote.clone(),
+            voted_at: env.ledger().timestamp(),
+        };
+
+        env.storage().persistent().set(&vote_key, &arbitrator_vote);
+
+        // Add arbitrator to the voters list for this dispute
+        let voters_key = DataKey::DisputeArbitratorVotes(dispute_id.clone());
+        let mut voters: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&voters_key)
+            .unwrap_or(vec![&env]);
+
+        voters.push_back(arbitrator.clone());
+        env.storage().persistent().set(&voters_key, &voters);
+
+        // Emit arbitrator vote event
+        env.events().publish(
+            (Symbol::new(&env, "DISPUTE"), Symbol::new(&env, "ARBITRATOR_VOTE")),
+            (dispute_id, arbitrator),
+        );
+
+        Ok(())
+    }
+
+    /// Issue #178: Check arbitrator voting threshold and auto-resolve if met.
+    pub fn check_arbitration_threshold(
+        env: Env,
+        dispute_id: String,
+    ) -> Result<bool, Error> {
+        let dispute = Self::get_dispute_internal(&env, &dispute_id)?;
+
+        if dispute.status != DisputeStatus::Open {
+            return Ok(false);
+        }
+
+        let voters_key = DataKey::DisputeArbitratorVotes(dispute_id.clone());
+        let voters: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&voters_key)
+            .unwrap_or(vec![&env]);
+
+        if voters.len() < ARBITRATOR_VOTING_THRESHOLD as usize {
+            return Ok(false); // Threshold not met
+        }
+
+        // Count approvals
+        let mut approvals: u32 = 0;
+        for voter in voters.iter() {
+            let vote_key = DataKey::ArbitratorVote(dispute_id.clone(), voter.clone());
+            if let Some(vote) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, ArbitratorVote>(&vote_key)
+            {
+                if let ArbitratorVoteChoice::Approve = vote.vote {
+                    approvals += 1;
+                }
+            }
+        }
+
+        // Threshold met if majority (>= threshold) approves
+        Ok(approvals >= ARBITRATOR_VOTING_THRESHOLD)
     }
 
     fn get_next_dispute_id(env: &Env) -> u64 {
@@ -3262,6 +3506,11 @@ impl PaymentProcessor {
             PaymentStatus::PartiallyPaid
         };
 
+        // Issue #63: Enforce tier-based monthly volume cap before confirming payment.
+        if new_status == PaymentStatus::Confirmed || new_status == PaymentStatus::Overpaid {
+            Self::enforce_tier_volume_cap(&env, &payment.merchant_id, amount_received)?;
+        }
+
         payment.status = new_status.clone();
 
         env.storage()
@@ -3432,7 +3681,23 @@ impl PaymentProcessor {
             return Err(Error::InvalidSettlement);
         }
 
-        // Verify split amounts are positive and total matches payment amount
+        // Calculate platform fee via MerchantRegistry if configured
+        let (platform_fee, fee_recipient) =
+            if let Some(registry_address) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, Address>(&DataKey::MerchantRegistryAddress)
+            {
+                let registry_client =
+                    crate::merchant_registry::MerchantRegistryClient::new(&env, &registry_address);
+                registry_client.calculate_fee(&payment.amount)
+            } else {
+                (0i128, env.current_contract_address())
+            };
+
+        let net_amount = payment.amount - platform_fee;
+
+        // Verify split amounts are positive and total matches net amount after fee
         let mut total: i128 = 0;
         for split in splits.iter() {
             if split.amount <= 0 {
@@ -3440,8 +3705,22 @@ impl PaymentProcessor {
             }
             total = total.saturating_add(split.amount);
         }
-        if total != payment.amount {
+        if total != net_amount {
             return Err(Error::InvalidSettlement);
+        }
+
+        // Transfer platform fee to fee_recipient
+        if platform_fee > 0 {
+            if let Some(usdc_token_address) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, Address>(&DataKey::UsdcToken)
+            {
+                let token_client = token::TokenClient::new(&env, &usdc_token_address);
+                let from = env.current_contract_address();
+                let fee_muxed: MuxedAddress = (&fee_recipient).into();
+                let _ = token_client.try_transfer(&from, &fee_muxed, &platform_fee);
+            }
         }
 
         payment.status = PaymentStatus::Settled;
@@ -3699,6 +3978,59 @@ impl PaymentProcessor {
         counter
     }
 
+    /// Enforce KYC tier monthly volume cap. Returns `TierVolumeLimitExceeded` if adding
+    /// `amount` would exceed the merchant's tier cap for the current calendar month.
+    /// On success, persists the updated cumulative volume.
+    fn enforce_tier_volume_cap(
+        env: &Env,
+        merchant_id: &Address,
+        amount: i128,
+    ) -> Result<(), Error> {
+        // Derive the monthly cap from the merchant's KYC tier (cross-contract if registry set).
+        let cap = if let Some(registry_address) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, Address>(&DataKey::MerchantRegistryAddress)
+        {
+            let registry_client =
+                crate::merchant_registry::MerchantRegistryClient::new(env, &registry_address);
+            match registry_client.try_get_merchant(merchant_id) {
+                Ok(Ok(merchant)) => {
+                    use crate::merchant_registry::KycTier;
+                    match merchant.kyc_tier {
+                        KycTier::Business => TIER_CAP_BUSINESS,
+                        KycTier::Full => TIER_CAP_FULL,
+                        KycTier::Basic => TIER_CAP_BASIC,
+                        KycTier::Unverified => TIER_CAP_UNVERIFIED,
+                    }
+                }
+                _ => TIER_CAP_UNVERIFIED,
+            }
+        } else {
+            TIER_CAP_BUSINESS // No registry → no cap
+        };
+
+        if cap == i128::MAX {
+            return Ok(()); // Business tier: unlimited
+        }
+
+        // Month epoch: seconds since Unix epoch / seconds-per-30-days, cast to u32.
+        let month_epoch = (env.ledger().timestamp() / 2_592_000) as u32;
+        let key = DataKey::MerchantMonthlyVolume(merchant_id.clone(), month_epoch);
+
+        let current: i128 = env.storage().persistent().get(&key).unwrap_or(0);
+        let new_total = current.saturating_add(amount);
+
+        if new_total > cap {
+            return Err(Error::TierVolumeLimitExceeded);
+        }
+
+        env.storage().persistent().set(&key, &new_total);
+        Self::bump_ttl(env, &key, LONG_LIVE_TTL);
+
+        Ok(())
+    }
+
     fn get_payment_internal(env: &Env, payment_id: &String) -> Result<PaymentCharge, Error> {
         env.storage()
             .persistent()
@@ -3898,6 +4230,21 @@ impl PaymentProcessor {
     /// Close a terminal (Exhausted/Cancelled) stream and remove its storage entry.
     pub fn close_expired_stream(env: Env, stream_id: String) -> Result<(), StreamError> {
         PaymentStreaming::close_expired_stream(env, stream_id)
+    }
+
+    /// Set the platform fee in basis points applied to stream withdrawals.
+    /// Only the admin may call this.
+    pub fn set_stream_fee_bps(env: Env, admin: Address, fee_bps: i128) -> Result<(), Error> {
+        admin.require_auth();
+        if AccessControl::get_admin(&env) != Some(admin) {
+            return Err(Error::AccessControlError);
+        }
+        PaymentStreaming::set_stream_fee_bps(env, fee_bps);
+        Ok(())
+    }
+
+    pub fn get_stream_fee_bps(env: Env) -> i128 {
+        PaymentStreaming::get_stream_fee_bps(env)
     }
 }
 
