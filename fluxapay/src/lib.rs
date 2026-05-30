@@ -608,6 +608,86 @@ impl RefundManager {
             .map_err(|_| Error::AccessControlError)
     }
 
+    /// Synchronize a role grant across PaymentProcessor and RefundManager.
+    ///
+    /// If either grant fails, the transaction aborts and no changes are persisted.
+    pub fn sync_grant_role_with_payment_processor(
+        env: Env,
+        admin: Address,
+        payment_processor_address: Address,
+        role: Symbol,
+        account: Address,
+    ) -> Result<(), Error> {
+        admin.require_auth();
+        if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
+            return Err(Error::Unauthorized);
+        }
+
+        AccessControl::grant_role(&env, admin.clone(), role.clone(), account.clone())
+            .map_err(|_| Error::AccessControlError)?;
+
+        let payment_client = crate::PaymentProcessorClient::new(&env, &payment_processor_address);
+        payment_client
+            .try_grant_role(&admin, &role, &account)
+            .map_err(|_| Error::AccessControlError)?
+            .map_err(|_| Error::AccessControlError)?;
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "ACCESS_CONTROL"),
+                Symbol::new(&env, "SYNC_GRANT"),
+            ),
+            (role, account),
+        );
+
+        Ok(())
+    }
+
+    /// Synchronize a role revoke across PaymentProcessor and RefundManager.
+    ///
+    /// If either revoke fails, the transaction aborts and no changes are persisted.
+    pub fn sync_revoke_role_with_payment_processor(
+        env: Env,
+        admin: Address,
+        payment_processor_address: Address,
+        role: Symbol,
+        account: Address,
+    ) -> Result<(), Error> {
+        admin.require_auth();
+        if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
+            return Err(Error::Unauthorized);
+        }
+
+        AccessControl::revoke_role(&env, admin.clone(), role.clone(), account.clone())
+            .map_err(|_| Error::AccessControlError)?;
+
+        let payment_client = crate::PaymentProcessorClient::new(&env, &payment_processor_address);
+        payment_client
+            .try_revoke_role(&admin, &role, &account)
+            .map_err(|_| Error::AccessControlError)?
+            .map_err(|_| Error::AccessControlError)?;
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "ACCESS_CONTROL"),
+                Symbol::new(&env, "SYNC_REVOKE"),
+            ),
+            (role, account),
+        );
+
+        Ok(())
+    }
+
+    pub fn revoke_role(
+        env: Env,
+        admin: Address,
+        role: Symbol,
+        account: Address,
+    ) -> Result<(), Error> {
+        AccessControl::revoke_role(&env, admin, role, account)
+            .map_err(|_| Error::AccessControlError)
+    }
+
     pub fn has_role(env: Env, role: Symbol, account: Address) -> bool {
         AccessControl::has_role(&env, &role, &account)
     }
