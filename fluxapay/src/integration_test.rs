@@ -344,3 +344,174 @@ fn test_upgrade_contract_storage_compatibility() {
     let payment_after = payment_client.get_payment(&payment_id);
     assert_eq!(payment_after.amount, amount);
 }
+
+#[test]
+fn test_prune_expired_payments_expired_pending() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (admin, payment_client, _refund_client, _merchant_client) = setup_integration(&env);
+    let merchant = Address::generate(&env);
+    let operator = Address::generate(&env);
+
+    payment_client.grant_role(&admin, &Symbol::new(&env, "MERCHANT"), &merchant);
+    payment_client.grant_role(&admin, &Symbol::new(&env, "SETTLEMENT_OPERATOR"), &operator);
+
+    // Create an expired pending payment
+    let payment_id = String::from_str(&env, "PAY_EXPIRE_PRUNE");
+    let amount = 1000i128;
+    let expires_at = env.ledger().timestamp() + 100;
+
+    let args = crate::CreatePaymentArgs {
+        payment_id: payment_id.clone(),
+        merchant_id: merchant.clone(),
+        amount,
+        currency: Symbol::new(&env, "USDC"),
+        deposit_address: Address::generate(&env),
+        expires_at: Some(expires_at),
+        duration_secs: None,
+        memo: None,
+        memo_type: None,
+        token_address: None,
+        client_token: None,
+        metadata_hash: None,
+    };
+    payment_client.create_payment(&args);
+
+    // Jump forward in time to expire the payment
+    env.ledger().set_timestamp(expires_at + 1);
+
+    // Prune the expired payment
+    let payment_ids = vec![&env, payment_id.clone()];
+    let result = payment_client.prune_expired_payments(&operator, &payment_ids);
+    assert_eq!(result.unwrap(), 1);
+
+    // Verify payment is deleted
+    let get_result = payment_client.get_payment(&payment_id);
+    assert!(get_result.is_err());
+}
+
+#[test]
+fn test_prune_expired_payments_non_expired_skipped() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (admin, payment_client, _refund_client, _merchant_client) = setup_integration(&env);
+    let merchant = Address::generate(&env);
+    let operator = Address::generate(&env);
+
+    payment_client.grant_role(&admin, &Symbol::new(&env, "MERCHANT"), &merchant);
+    payment_client.grant_role(&admin, &Symbol::new(&env, "SETTLEMENT_OPERATOR"), &operator);
+
+    // Create a non-expired pending payment
+    let payment_id = String::from_str(&env, "PAY_NOT_EXPIRE");
+    let amount = 1000i128;
+    let expires_at = env.ledger().timestamp() + 3600;
+
+    let args = crate::CreatePaymentArgs {
+        payment_id: payment_id.clone(),
+        merchant_id: merchant.clone(),
+        amount,
+        currency: Symbol::new(&env, "USDC"),
+        deposit_address: Address::generate(&env),
+        expires_at: Some(expires_at),
+        duration_secs: None,
+        memo: None,
+        memo_type: None,
+        token_address: None,
+        client_token: None,
+        metadata_hash: None,
+    };
+    payment_client.create_payment(&args);
+
+    // Prune (payment should not be pruned as it's not expired)
+    let payment_ids = vec![&env, payment_id.clone()];
+    let result = payment_client.prune_expired_payments(&operator, &payment_ids);
+    assert_eq!(result.unwrap(), 0);
+
+    // Verify payment still exists
+    let payment_info = payment_client.get_payment(&payment_id);
+    assert!(payment_info.is_ok());
+}
+
+#[test]
+fn test_prune_expired_payments_non_pending_skipped() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (admin, payment_client, _refund_client, _merchant_client) = setup_integration(&env);
+    let merchant = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let operator = Address::generate(&env);
+
+    payment_client.grant_role(&admin, &Symbol::new(&env, "MERCHANT"), &merchant);
+    payment_client.grant_role(&admin, &Symbol::new(&env, "ORACLE"), &oracle);
+    payment_client.grant_role(&admin, &Symbol::new(&env, "SETTLEMENT_OPERATOR"), &operator);
+
+    // Create a confirmed (non-pending) payment
+    let payment_id = String::from_str(&env, "PAY_CONFIRMED");
+    let amount = 1000i128;
+    let expires_at = env.ledger().timestamp() + 100;
+
+    let args = crate::CreatePaymentArgs {
+        payment_id: payment_id.clone(),
+        merchant_id: merchant.clone(),
+        amount,
+        currency: Symbol::new(&env, "USDC"),
+        deposit_address: Address::generate(&env),
+        expires_at: Some(expires_at),
+        duration_secs: None,
+        memo: None,
+        memo_type: None,
+        token_address: None,
+        client_token: None,
+        metadata_hash: None,
+    };
+    payment_client.create_payment(&args);
+
+    // Verify the payment to change it from Pending to Confirmed
+    let customer = Address::generate(&env);
+    payment_client.verify_payment(&oracle, &payment_id, &BytesN::<32>::random(&env), &customer, &amount);
+
+    // Jump forward in time
+    env.ledger().set_timestamp(expires_at + 1);
+
+    // Prune (confirmed payment should not be pruned)
+    let payment_ids = vec![&env, payment_id.clone()];
+    let result = payment_client.prune_expired_payments(&operator, &payment_ids);
+    assert_eq!(result.unwrap(), 0);
+
+    // Verify payment still exists
+    let payment_info = payment_client.get_payment(&payment_id);
+    assert_eq!(payment_info.unwrap().status, PaymentStatus::Confirmed);
+}
+
+#[test]
+fn test_prune_expired_payments_unauthorized_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (admin, payment_client, _refund_client, _merchant_client) = setup_integration(&env);
+    let non_operator = Address::generate(&env);
+
+    // Try to prune as non-operator
+    let payment_ids = vec![&env];
+    let result = payment_client.prune_expired_payments(&non_operator, &payment_ids);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_prune_expired_payments_empty_list() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (admin, payment_client, _refund_client, _merchant_client) = setup_integration(&env);
+    let operator = Address::generate(&env);
+
+    payment_client.grant_role(&admin, &Symbol::new(&env, "SETTLEMENT_OPERATOR"), &operator);
+
+    // Prune with empty list
+    let payment_ids = vec![&env];
+    let result = payment_client.prune_expired_payments(&operator, &payment_ids);
+    assert_eq!(result.unwrap(), 0);
+}

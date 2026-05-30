@@ -4327,6 +4327,34 @@ impl PaymentProcessor {
         Ok(())
     }
 
+    pub fn prune_expired_payments(
+        env: Env,
+        operator: Address,
+        payment_ids: Vec<String>,
+    ) -> Result<u32, Error> {
+        operator.require_auth();
+
+        if !AccessControl::has_role(&env, &role_settlement_operator(&env), &operator) {
+            return Err(Error::Unauthorized);
+        }
+
+        let mut pruned_count: u32 = 0;
+        let current_timestamp = env.ledger().timestamp();
+
+        for payment_id in payment_ids.iter() {
+            if let Ok(payment) = Self::get_payment_internal(&env, &payment_id) {
+                if payment.status == PaymentStatus::Pending && payment.expires_at <= current_timestamp {
+                    env.storage()
+                        .persistent()
+                        .remove(&DataKey::Payment(payment_id.clone()));
+                    pruned_count = pruned_count.saturating_add(1);
+                }
+            }
+        }
+
+        Ok(pruned_count)
+    }
+
     /// Validate DEX path quotes before executing a swap.
     /// Blocks circular routes and rejects paths whose quoted output is below the minimum.
     fn validate_path_returns(
