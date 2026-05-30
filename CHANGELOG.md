@@ -1,5 +1,17 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- `scripts/deploy_testnet.sh`: builds all contract WASMs and deploys them to the configured Stellar network; writes resulting contract IDs to `.env.testnet`; fails fast if `STELLAR_SECRET_KEY` or `STELLAR_NETWORK` are unset (closes #294)
+- `docs/local-invoke.md`: CLI recipe sections for `create_refund`, `process_refund`, `create_dispute`, `set_dispute_deadline`, `resolve_dispute_with_refund`, `verify_payment`, `settle_payment`, `set_paused`, `set_rate`, `create_link`, and `use_link` — each with full command, expected output, and error scenarios (closes #299)
+- `docs/local-invoke.md`: Deployment section documenting how to run `scripts/deploy_testnet.sh` and load `.env.testnet`
+
+### Changed
+- `.github/workflows/deploy.yml`: replaced inline build and deploy steps with a call to `scripts/deploy_testnet.sh`; exposes all four contract IDs as step outputs; uploads `.env.testnet` as a workflow artifact
+
+---
+
 ## Contract Versions
 
 Each contract exposes a `version() -> u32` function. Bump this value whenever a storage key or struct layout changes in a breaking way.
