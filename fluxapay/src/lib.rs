@@ -5306,6 +5306,20 @@ impl PaymentProcessor {
         }
         PaymentStreaming::cancel_stream(env, sender, stream_id)
     }
+
+    pub fn pause_stream(env: Env, sender: Address, stream_id: String) -> Result<(), StreamError> {
+        if Self::is_blacklisted_address(&env, &sender) {
+            return Err(StreamError::Unauthorized);
+        }
+        PaymentStreaming::pause_stream(env, sender, stream_id)
+    }
+
+    pub fn resume_stream(env: Env, sender: Address, stream_id: String) -> Result<(), StreamError> {
+        if Self::is_blacklisted_address(&env, &sender) {
+            return Err(StreamError::Unauthorized);
+        }
+        PaymentStreaming::resume_stream(env, sender, stream_id)
+    }
     pub fn cancel_multiple_streams(
         env: Env,
         sender: Address,
