@@ -5701,3 +5701,6 @@ pub use utils::validate_ipfs_multihash;
 
 pub mod gas_estimator;
 pub use gas_estimator::{CostEstimate, GasEstimator, GasEstimatorClient, Operation};
+
+#[cfg(test)]
+mod swap_test;
