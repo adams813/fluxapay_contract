@@ -7,6 +7,11 @@
 - `docs/local-invoke.md`: CLI recipe sections for `create_refund`, `process_refund`, `create_dispute`, `set_dispute_deadline`, `resolve_dispute_with_refund`, `verify_payment`, `settle_payment`, `set_paused`, `set_rate`, `create_link`, and `use_link` — each with full command, expected output, and error scenarios (closes #299)
 - `docs/local-invoke.md`: Deployment section documenting how to run `scripts/deploy_testnet.sh` and load `.env.testnet`
 
+- `check_dispute_deadline(dispute_id)`: public callable to trigger escalation when a dispute review deadline has elapsed; emits `DISPUTE/ESCALATED` and is a no-op if not passed/already escalated/resolved (closes #306)
+- `top_up_stream(stream_id, amount)`: allows a sender to top up a single stream via direct token transfer; credits the stream deposit and emits `STREAM/TOPPED_UP` (closes #305)
+- Treasury accounting: refund-time fees now accumulate in `DataKey::TreasuryBalance`; adds `get_treasury_balance()` and `withdraw_treasury(admin, amount, destination)` for admin withdrawals; emits `TREASURY/WITHDRAWN` and introduces `Error::InsufficientTreasuryBalance` (closes #291)
+- `create_payments_batch`: atomic batch payment creation API with a maximum batch size of 50 and per-merchant batch rate-limit enforcement; returns payment IDs in order and emits `PAYMENT/CREATED` for each payment (closes #293)
+
 ### Changed
 - `.github/workflows/deploy.yml`: replaced inline build and deploy steps with a call to `scripts/deploy_testnet.sh`; exposes all four contract IDs as step outputs; uploads `.env.testnet` as a workflow artifact
 
