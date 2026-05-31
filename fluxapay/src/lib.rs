@@ -265,6 +265,10 @@ pub enum Error {
     StaleOracleRate = 45,
     /// Issue #313: Reentrancy detected in process_refund_internal or settle_payment.
     Reentrancy = 43,
+    /// Issue #317: Payment link metadata has too many keys (> 20).
+    MetadataTooLarge = 46,
+    /// Issue #317: Payment link metadata value exceeds maximum length (> 256 chars).
+    MetadataValueTooLong = 47,
 }
 
 #[contracttype]
