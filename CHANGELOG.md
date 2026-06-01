@@ -12,6 +12,12 @@
 - Treasury accounting: refund-time fees now accumulate in `DataKey::TreasuryBalance`; adds `get_treasury_balance()` and `withdraw_treasury(admin, amount, destination)` for admin withdrawals; emits `TREASURY/WITHDRAWN` and introduces `Error::InsufficientTreasuryBalance` (closes #291)
 - `create_payments_batch`: atomic batch payment creation API with a maximum batch size of 50 and per-merchant batch rate-limit enforcement; returns payment IDs in order and emits `PAYMENT/CREATED` for each payment (closes #293)
 
+- AccessControl edge-case tests: `renounce_role` idempotency for non-holders, self-role removal, and unauthorized `transfer_admin` validation (closes #337)
+- FXOracle role management tests: `oracle_grant_role` by admin/non-admin authorization, `oracle_has_role` verification, and `get_fx_admin` initialized/uninitialized states (closes #335)
+- MerchantRegistry pagination tests: `get_all_merchants` offset-based edge cases including beyond-range offsets and zero-limit handling (closes #337)
+- PaymentStreaming batch operation tests: `top_up_multiple_streams` authorization and deposit updates, `cancel_multiple_streams` atomicity with invalid IDs, `batch_withdraw_to` multi-destination routing and zero-accrued stream handling (closes #336)
+- PaymentLinkManager batch verification tests: `verify_batch` coverage for active/missing/deactivated links and empty input handling (closes #334)
+
 ### Changed
 - `.github/workflows/deploy.yml`: replaced inline build and deploy steps with a call to `scripts/deploy_testnet.sh`; exposes all four contract IDs as step outputs; uploads `.env.testnet` as a workflow artifact
 
