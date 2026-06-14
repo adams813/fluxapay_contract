@@ -5974,6 +5974,8 @@ pub mod stream;
 pub use stream::{PaymentStream, PaymentStreaming, StreamError, StreamStatus};
 #[cfg(test)]
 mod stream_test;
+#[cfg(test)]
+mod subscription_test;
 
 pub mod utils;
 pub use utils::format_id;
