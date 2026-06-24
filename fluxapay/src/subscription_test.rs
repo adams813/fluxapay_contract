@@ -2,7 +2,7 @@ use crate::{
     access_control::role_oracle, BillingInterval, Error, RefundManager, RefundManagerClient,
     SubscriptionStatus,
 };
-use soroban_sdk::{testutils::Address as _, testutils::Events, Address, Env, String, Symbol, vec, TryIntoVal};
+use soroban_sdk::{testutils::Address as _, testutils::Events, testutils::Ledger as _, Address, Env, String, Symbol, vec, TryIntoVal};
 
 // ── Shared setup helpers ──────────────────────────────────────────────────────
 
@@ -96,7 +96,7 @@ fn test_create_subscription_plan_by_merchant_stores_plan() {
     env.mock_all_auths();
     let (client, _admin, merchant, plan_id) = setup_with_plan(&env);
 
-    let plan = client.get_subscription_plan(&plan_id).expect("plan should exist");
+    let plan = client.get_subscription_plan(&plan_id);
     assert_eq!(plan.plan_id, plan_id);
     assert_eq!(plan.merchant_id, merchant);
     assert_eq!(plan.amount, 1_000_000_i128);
@@ -135,7 +135,7 @@ fn test_subscribe_to_active_plan_creates_subscription_and_emits_event() {
     let sub_id = client.subscribe(&payer, &plan_id, &None, &None, &None);
 
     // Subscription exists and is Active
-    let sub = client.get_subscription(&sub_id).expect("subscription should exist");
+    let sub = client.get_subscription(&sub_id);
     assert_eq!(sub.subscription_id, sub_id);
     assert_eq!(sub.payer_address, payer);
     assert_eq!(sub.status, SubscriptionStatus::Active);
@@ -147,8 +147,14 @@ fn test_subscribe_to_active_plan_creates_subscription_and_emits_event() {
         if topics.len() < 2 {
             return false;
         }
-        let t0: Result<Symbol, _> = topics.get(0).unwrap().try_into_val(&env);
-        let t1: Result<Symbol, _> = topics.get(1).unwrap().try_into_val(&env);
+        let Some(v0) = topics.get(0) else {
+            return false;
+        };
+        let Some(v1) = topics.get(1) else {
+            return false;
+        };
+        let t0: Result<Symbol, _> = v0.try_into_val(&env);
+        let t1: Result<Symbol, _> = v1.try_into_val(&env);
         matches!(
             (t0, t1),
             (Ok(a), Ok(b)) if a == Symbol::new(&env, "SUBSCRIPTION") && b == Symbol::new(&env, "CREATED")
@@ -184,7 +190,7 @@ fn test_pause_subscription_by_payer_becomes_paused() {
 
     client.pause_subscription(&payer, &sub_id);
 
-    let sub = client.get_subscription(&sub_id).expect("subscription should exist");
+    let sub = client.get_subscription(&sub_id);
     assert_eq!(sub.status, SubscriptionStatus::Paused);
 }
 
@@ -202,12 +208,13 @@ fn test_resume_subscription_by_payer_becomes_active_with_updated_payment_at() {
     client.pause_subscription(&payer, &sub_id);
 
     // Advance time
-    env.ledger().with_mut(|li| li.timestamp += 1_000);
+    env.ledger()
+        .set_timestamp(env.ledger().timestamp() + 1_000);
 
     let before_resume = env.ledger().timestamp();
     client.resume_subscription(&payer, &sub_id);
 
-    let sub = client.get_subscription(&sub_id).expect("subscription should exist");
+    let sub = client.get_subscription(&sub_id);
     assert_eq!(sub.status, SubscriptionStatus::Active);
     // next_payment_at must be after the resume timestamp
     assert!(
@@ -230,7 +237,7 @@ fn test_cancel_subscription_by_payer_becomes_cancelled() {
 
     client.cancel_subscription(&payer, &sub_id);
 
-    let sub = client.get_subscription(&sub_id).expect("subscription should exist");
+    let sub = client.get_subscription(&sub_id);
     assert_eq!(sub.status, SubscriptionStatus::Cancelled);
 }
 
@@ -270,6 +277,6 @@ fn test_deactivate_subscription_plan_by_merchant_marks_inactive() {
 
     client.deactivate_subscription_plan(&merchant, &plan_id);
 
-    let plan = client.get_subscription_plan(&plan_id).expect("plan should exist");
+    let plan = client.get_subscription_plan(&plan_id);
     assert!(!plan.active, "Plan should be inactive after deactivation");
 }
