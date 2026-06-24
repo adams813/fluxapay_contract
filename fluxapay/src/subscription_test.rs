@@ -2,7 +2,10 @@ use crate::{
     access_control::role_oracle, BillingInterval, Error, RefundManager, RefundManagerClient,
     SubscriptionStatus,
 };
-use soroban_sdk::{testutils::Address as _, testutils::Events, Address, Env, String, Symbol, vec, TryIntoVal};
+use soroban_sdk::{
+    testutils::Address as _, testutils::Events, testutils::Ledger, vec, Address, Env, String,
+    Symbol, TryIntoVal,
+};
 
 // ── Shared setup helpers ──────────────────────────────────────────────────────
 
@@ -22,22 +25,11 @@ fn setup_refund_manager(env: &Env) -> (Address, RefundManagerClient<'_>) {
 
 /// Create a merchant with MERCHANT role and a subscription plan, returning
 /// `(client, admin, merchant, plan_id)`.
-fn setup_with_plan(
-    env: &Env,
-) -> (
-    RefundManagerClient<'_>,
-    Address,
-    Address,
-    String,
-) {
+fn setup_with_plan(env: &Env) -> (RefundManagerClient<'_>, Address, Address, String) {
     let (admin, client) = setup_refund_manager(env);
 
     let merchant = Address::generate(env);
-    client.grant_role(
-        &admin,
-        &Symbol::new(env, "MERCHANT"),
-        &merchant,
-    );
+    client.grant_role(&admin, &Symbol::new(env, "MERCHANT"), &merchant);
 
     let plan_id = String::from_str(env, "plan_weekly");
     client.create_subscription_plan(
@@ -96,7 +88,7 @@ fn test_create_subscription_plan_by_merchant_stores_plan() {
     env.mock_all_auths();
     let (client, _admin, merchant, plan_id) = setup_with_plan(&env);
 
-    let plan = client.get_subscription_plan(&plan_id).expect("plan should exist");
+    let plan = client.get_subscription_plan(&plan_id);
     assert_eq!(plan.plan_id, plan_id);
     assert_eq!(plan.merchant_id, merchant);
     assert_eq!(plan.amount, 1_000_000_i128);
@@ -135,7 +127,7 @@ fn test_subscribe_to_active_plan_creates_subscription_and_emits_event() {
     let sub_id = client.subscribe(&payer, &plan_id, &None, &None, &None);
 
     // Subscription exists and is Active
-    let sub = client.get_subscription(&sub_id).expect("subscription should exist");
+    let sub = client.get_subscription(&sub_id);
     assert_eq!(sub.subscription_id, sub_id);
     assert_eq!(sub.payer_address, payer);
     assert_eq!(sub.status, SubscriptionStatus::Active);
@@ -169,7 +161,10 @@ fn test_subscribe_to_inactive_plan_fails() {
 
     let payer = Address::generate(&env);
     let result = client.try_subscribe(&payer, &plan_id, &None, &None, &None);
-    assert!(result.is_err(), "Expected error when subscribing to inactive plan");
+    assert!(
+        result.is_err(),
+        "Expected error when subscribing to inactive plan"
+    );
 }
 
 /// Payer can pause an active subscription and it becomes Paused.
@@ -184,7 +179,7 @@ fn test_pause_subscription_by_payer_becomes_paused() {
 
     client.pause_subscription(&payer, &sub_id);
 
-    let sub = client.get_subscription(&sub_id).expect("subscription should exist");
+    let sub = client.get_subscription(&sub_id);
     assert_eq!(sub.status, SubscriptionStatus::Paused);
 }
 
@@ -207,7 +202,7 @@ fn test_resume_subscription_by_payer_becomes_active_with_updated_payment_at() {
     let before_resume = env.ledger().timestamp();
     client.resume_subscription(&payer, &sub_id);
 
-    let sub = client.get_subscription(&sub_id).expect("subscription should exist");
+    let sub = client.get_subscription(&sub_id);
     assert_eq!(sub.status, SubscriptionStatus::Active);
     // next_payment_at must be after the resume timestamp
     assert!(
@@ -230,7 +225,7 @@ fn test_cancel_subscription_by_payer_becomes_cancelled() {
 
     client.cancel_subscription(&payer, &sub_id);
 
-    let sub = client.get_subscription(&sub_id).expect("subscription should exist");
+    let sub = client.get_subscription(&sub_id);
     assert_eq!(sub.status, SubscriptionStatus::Cancelled);
 }
 
@@ -257,8 +252,14 @@ fn test_get_payer_subscriptions_returns_all_for_payer() {
         }
         v
     };
-    assert!(ids.contains(&sub_id_1), "sub_id_1 not found in payer subscriptions");
-    assert!(ids.contains(&sub_id_2), "sub_id_2 not found in payer subscriptions");
+    assert!(
+        ids.contains(&sub_id_1),
+        "sub_id_1 not found in payer subscriptions"
+    );
+    assert!(
+        ids.contains(&sub_id_2),
+        "sub_id_2 not found in payer subscriptions"
+    );
 }
 
 /// Merchant can deactivate a plan; subsequent subscribe attempts fail.
@@ -270,6 +271,6 @@ fn test_deactivate_subscription_plan_by_merchant_marks_inactive() {
 
     client.deactivate_subscription_plan(&merchant, &plan_id);
 
-    let plan = client.get_subscription_plan(&plan_id).expect("plan should exist");
+    let plan = client.get_subscription_plan(&plan_id);
     assert!(!plan.active, "Plan should be inactive after deactivation");
 }

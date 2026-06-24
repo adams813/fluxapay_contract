@@ -1,6 +1,9 @@
-﻿use super::merchant_registry::*;
+use super::merchant_registry::*;
 use crate::{PaymentProcessor, PaymentProcessorClient, RefundManager, RefundManagerClient};
-use soroban_sdk::{testutils::Address as _, testutils::Events, testutils::Ledger, Address, Env, String, Symbol, TryIntoVal};
+use soroban_sdk::{
+    testutils::Address as _, testutils::Events, testutils::Ledger, Address, Env, String, Symbol,
+    TryIntoVal,
+};
 
 #[test]
 fn test_merchant_registration() {
@@ -360,7 +363,8 @@ fn test_unverified_merchant_cannot_create_payment() {
         memo_type: None,
         token_address: None,
         client_token: None,
-        metadata_hash: None, metadata: None,
+        metadata_hash: None,
+        metadata: None,
     };
 
     // This should panic with Unauthorized error
@@ -421,7 +425,8 @@ fn test_verified_merchant_can_create_payment() {
         memo_type: None,
         token_address: None,
         client_token: None,
-        metadata_hash: None, metadata: None,
+        metadata_hash: None,
+        metadata: None,
     };
 
     let payment = payment_client.create_payment(&args);
@@ -661,7 +666,12 @@ fn test_suspend_merchant_unauthorized() {
         &None,
     );
 
-    client.suspend_merchant(&attacker, &merchant_id, &String::from_str(&env, "Reason"), &0u64);
+    client.suspend_merchant(
+        &attacker,
+        &merchant_id,
+        &String::from_str(&env, "Reason"),
+        &0u64,
+    );
 }
 
 // Tests for issue #208: Content-Addressable Merchant Profiles
@@ -1223,7 +1233,7 @@ fn test_verify_merchant_with_oracle_signature() {
     );
 
     let signature = String::from_str(&env, "0x1234567890abcdef");
-    
+
     // Verify merchant with oracle signature
     client.verify_merchant_with_signature(&admin, &merchant_id, &Some(signature.clone()));
 
@@ -1254,9 +1264,14 @@ fn test_set_kyc_tier_with_oracle_signature() {
     );
 
     let signature = String::from_str(&env, "0xabcdef1234567890");
-    
+
     // Set KYC tier with oracle signature
-    client.set_kyc_tier_with_signature(&admin, &merchant_id, &KycTier::Full, &Some(signature.clone()));
+    client.set_kyc_tier_with_signature(
+        &admin,
+        &merchant_id,
+        &KycTier::Full,
+        &Some(signature.clone()),
+    );
 
     let merchant = client.get_merchant(&merchant_id);
     assert_eq!(merchant.oracle_signature, Some(signature));
@@ -1310,11 +1325,15 @@ fn test_basic_tier_cap_enforced() {
     env.mock_all_auths();
     env.ledger().with_mut(|li| li.timestamp = 1_000_000);
 
-    let (admin, payment_client, registry_client, merchant, oracle) =
-        setup_volume_cap_env(&env);
+    let (admin, payment_client, registry_client, merchant, oracle) = setup_volume_cap_env(&env);
 
     // Set merchant to Basic tier ($10,000 cap = 100_000_000_000 stroops)
-    registry_client.set_kyc_tier_with_signature(&admin, &merchant, &KycTier::Basic, &Some(String::from_str(&env, "sig")));
+    registry_client.set_kyc_tier_with_signature(
+        &admin,
+        &merchant,
+        &KycTier::Basic,
+        &Some(String::from_str(&env, "sig")),
+    );
 
     let deposit = Address::generate(&env);
 
@@ -1332,7 +1351,8 @@ fn test_basic_tier_cap_enforced() {
         memo_type: None,
         token_address: None,
         client_token: None,
-        metadata_hash: None, metadata: None,
+        metadata_hash: None,
+        metadata: None,
     });
     payment_client.verify_payment(
         &oracle,
@@ -1356,7 +1376,8 @@ fn test_basic_tier_cap_enforced() {
         memo_type: None,
         token_address: None,
         client_token: None,
-        metadata_hash: None, metadata: None,
+        metadata_hash: None,
+        metadata: None,
     });
 
     let result = payment_client.try_verify_payment(
@@ -1375,11 +1396,15 @@ fn test_business_tier_no_cap() {
     env.mock_all_auths();
     env.ledger().with_mut(|li| li.timestamp = 1_000_000);
 
-    let (admin, payment_client, registry_client, merchant, oracle) =
-        setup_volume_cap_env(&env);
+    let (admin, payment_client, registry_client, merchant, oracle) = setup_volume_cap_env(&env);
 
     // Business tier: unlimited
-    registry_client.set_kyc_tier_with_signature(&admin, &merchant, &KycTier::Business, &Some(String::from_str(&env, "sig")));
+    registry_client.set_kyc_tier_with_signature(
+        &admin,
+        &merchant,
+        &KycTier::Business,
+        &Some(String::from_str(&env, "sig")),
+    );
 
     let deposit = Address::generate(&env);
 
@@ -1397,7 +1422,8 @@ fn test_business_tier_no_cap() {
         memo_type: None,
         token_address: None,
         client_token: None,
-        metadata_hash: None, metadata: None,
+        metadata_hash: None,
+        metadata: None,
     });
     payment_client.verify_payment(
         &oracle,
@@ -1415,10 +1441,14 @@ fn test_volume_resets_next_month() {
     // Start at beginning of a month epoch
     env.ledger().with_mut(|li| li.timestamp = 2_592_000); // epoch 1
 
-    let (admin, payment_client, registry_client, merchant, oracle) =
-        setup_volume_cap_env(&env);
+    let (admin, payment_client, registry_client, merchant, oracle) = setup_volume_cap_env(&env);
 
-    registry_client.set_kyc_tier_with_signature(&admin, &merchant, &KycTier::Basic, &Some(String::from_str(&env, "sig")));
+    registry_client.set_kyc_tier_with_signature(
+        &admin,
+        &merchant,
+        &KycTier::Basic,
+        &Some(String::from_str(&env, "sig")),
+    );
 
     let deposit = Address::generate(&env);
 
@@ -1436,7 +1466,8 @@ fn test_volume_resets_next_month() {
         memo_type: None,
         token_address: None,
         client_token: None,
-        metadata_hash: None, metadata: None,
+        metadata_hash: None,
+        metadata: None,
     });
     payment_client.verify_payment(
         &oracle,
@@ -1463,7 +1494,8 @@ fn test_volume_resets_next_month() {
         memo_type: None,
         token_address: None,
         client_token: None,
-        metadata_hash: None, metadata: None,
+        metadata_hash: None,
+        metadata: None,
     });
     payment_client.verify_payment(
         &oracle,
@@ -1522,7 +1554,7 @@ fn test_first_payout_address_set_produces_no_history() {
     assert_eq!(merchant.payout_address, Some(new_addr));
 
     // History is empty because there was no prior address
-    let history = client.get_payout_history(&merchant_id).unwrap();
+    let history = client.get_payout_history(&merchant_id);
     assert_eq!(history.len(), 0, "Expected no history on first set");
 }
 
@@ -1565,7 +1597,7 @@ fn test_payout_address_update_appends_old_to_history_and_emits_event() {
     let merchant = client.get_merchant(&merchant_id);
     assert_eq!(merchant.payout_address, Some(second_addr.clone()));
 
-    let history = client.get_payout_history(&merchant_id).unwrap();
+    let history = client.get_payout_history(&merchant_id);
     assert_eq!(history.len(), 1, "Expected one history entry");
     assert_eq!(history.get(0).unwrap(), first_addr);
 
@@ -1622,8 +1654,12 @@ fn test_unchanged_payout_address_produces_no_history_and_no_event() {
         &None,
     );
 
-    let history = client.get_payout_history(&merchant_id).unwrap();
-    assert_eq!(history.len(), 0, "Expected no history when address is unchanged");
+    let history = client.get_payout_history(&merchant_id);
+    assert_eq!(
+        history.len(),
+        0,
+        "Expected no history when address is unchanged"
+    );
 
     // Count PAYOUT_UPDATED events — should be zero
     let events = env.events().all();
@@ -1640,7 +1676,10 @@ fn test_unchanged_payout_address_produces_no_history_and_no_event() {
                 if a == Symbol::new(&env, "MERCHANT") && b == Symbol::new(&env, "PAYOUT_UPDATED")
         )
     }).count();
-    assert_eq!(payout_updated_count, 0, "Expected no PAYOUT_UPDATED events when address unchanged");
+    assert_eq!(
+        payout_updated_count, 0,
+        "Expected no PAYOUT_UPDATED events when address unchanged"
+    );
 }
 
 /// get_payout_history returns the full list of previous addresses in order.
@@ -1689,8 +1728,16 @@ fn test_get_payout_history_returns_all_previous_addresses_in_order() {
         &None,
     );
 
-    let history = client.get_payout_history(&merchant_id).unwrap();
+    let history = client.get_payout_history(&merchant_id);
     assert_eq!(history.len(), 2, "Expected two history entries");
-    assert_eq!(history.get(0).unwrap(), addr1, "First history entry should be addr1");
-    assert_eq!(history.get(1).unwrap(), addr2, "Second history entry should be addr2");
+    assert_eq!(
+        history.get(0).unwrap(),
+        addr1,
+        "First history entry should be addr1"
+    );
+    assert_eq!(
+        history.get(1).unwrap(),
+        addr2,
+        "Second history entry should be addr2"
+    );
 }

@@ -6092,4 +6092,6 @@ pub mod gas_estimator;
 pub use gas_estimator::{CostEstimate, GasEstimator, GasEstimatorClient, Operation};
 
 #[cfg(test)]
+mod mock_dex_router;
+#[cfg(test)]
 mod swap_test;
