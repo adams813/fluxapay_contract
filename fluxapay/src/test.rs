@@ -9,22 +9,46 @@ use soroban_sdk::{
 
 #[test]
 fn test_datakey_discriminant_stability() {
-    let _env = Env::default();
+    let env = Env::default();
+    let contract_id = env.register(PaymentProcessor, ());
+    let payment_id = String::from_str(&env, "stable-payment-key");
+    let refund_id = String::from_str(&env, "stable-refund-key");
+    let merchant = Address::generate(&env);
 
-    // We verify that the enum variants have stable discriminants.
-    // In Soroban, discriminants are 0-indexed based on definition order.
-    // If someone reorders the enum, these tests will fail (if we check XDR).
-    // A simpler way is to check that we can still read what we write.
+    // These keys protect persisted storage compatibility. Reordering DataKey variants changes
+    // their serialized discriminants, so values written by an earlier contract would no longer
+    // be readable under the expected variant.
+    env.as_contract(&contract_id, || {
+        env.storage()
+            .persistent()
+            .set(&DataKey::Payment(payment_id.clone()), &11u32);
+        assert_eq!(
+            env.storage()
+                .persistent()
+                .get::<_, u32>(&DataKey::Payment(payment_id)),
+            Some(11)
+        );
 
-    // However, the task specifically asked to check index.
-    // We can use core::mem::discriminant if it was stable across compiles, but
-    // in Rust it's not guaranteed unless #[repr(u32)] is used.
-    // DataKey in lib.rs DOES NOT have #[repr(u32)].
+        env.storage()
+            .persistent()
+            .set(&DataKey::Refund(refund_id.clone()), &22u32);
+        assert_eq!(
+            env.storage()
+                .persistent()
+                .get::<_, u32>(&DataKey::Refund(refund_id)),
+            Some(22)
+        );
 
-    // But Soroban's contracttype macro for enums uses the order of variants.
-    // Let's check the first few variants.
-
-    // We can't easily check the raw discriminant without converting to XDR.
+        env.storage()
+            .persistent()
+            .set(&DataKey::MerchantPayments(merchant.clone()), &33u32);
+        assert_eq!(
+            env.storage()
+                .persistent()
+                .get::<_, u32>(&DataKey::MerchantPayments(merchant)),
+            Some(33)
+        );
+    });
 }
 
 fn setup_payment_processor(env: &Env) -> (Address, PaymentProcessorClient<'_>) {
@@ -1796,7 +1820,51 @@ fn test_get_merchant_and_global_limits() {
     assert_eq!(merchant.max, Some(2000i128));
 }
 
+#[test]
+fn test_non_merchant_cannot_set_merchant_amount_limits() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_, client) = setup_payment_processor(&env);
+    let non_merchant = Address::generate(&env);
+
+    let result =
+        client.try_set_merchant_amount_limits(&non_merchant, &Some(100i128), &Some(2000i128));
+
+    assert_eq!(result, Err(Ok(Error::Unauthorized)));
+}
+
+#[test]
+fn test_non_admin_cannot_set_global_amount_limits() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_, client) = setup_payment_processor(&env);
+    let non_admin = Address::generate(&env);
+
+    let result =
+        client.try_set_global_amount_limits(&non_admin, &Some(100i128), &Some(2000i128));
+
+    assert_eq!(result, Err(Ok(Error::Unauthorized)));
+}
+
 // --- Multi-asset payment tests ---
+
+#[test]
+fn test_allow_token_unauthorized_non_admin() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_admin, client) = setup_payment_processor(&env);
+
+    let token_admin = Address::generate(&env);
+    let token = env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
+    let non_admin = Address::generate(&env);
+
+    let result = client.try_allow_token(&non_admin, &token);
+
+    assert_eq!(result, Err(Ok(Error::Unauthorized)));
+    assert!(!client.is_token_allowed(&token));
+}
 
 #[test]
 fn test_create_payment_with_allowed_token() {
@@ -2324,6 +2392,100 @@ fn test_settle_payment_split_total_mismatch_fails() {
     ];
     let result = client.try_settle_payment(&operator, &payment_id, &splits);
     assert_eq!(result, Err(Ok(Error::InvalidSettlement)));
+}
+
+#[test]
+fn test_settle_payment_unauthorized_non_operator() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    let payment_id = String::from_str(&env, "settle_unauth");
+    let amount = 1000i128;
+    make_confirmed_payment(&env, &client, &admin, &payment_id, amount);
+
+    let non_operator = Address::generate(&env);
+    let splits = vec![
+        &env,
+        SettlementSplit {
+            recipient: Address::generate(&env),
+            amount,
+        },
+    ];
+    let result = client.try_settle_payment(&non_operator, &payment_id, &splits);
+
+    assert_eq!(result, Err(Ok(Error::Unauthorized)));
+    assert_eq!(
+        client.get_payment(&payment_id).status,
+        PaymentStatus::Confirmed
+    );
+}
+
+#[test]
+fn test_settle_payment_fails_on_pending_payment() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    let merchant = Address::generate(&env);
+    client.grant_role(&admin, &role_merchant(&env), &merchant);
+
+    let payment_id = String::from_str(&env, "settle_pending");
+    let amount = 1000i128;
+    let args = create_payment_args(&env, &payment_id, &merchant, amount);
+    client.create_payment(&args);
+
+    let operator = Address::generate(&env);
+    client.grant_role(&admin, &role_settlement_operator(&env), &operator);
+
+    let splits = vec![
+        &env,
+        SettlementSplit {
+            recipient: Address::generate(&env),
+            amount,
+        },
+    ];
+    let result = client.try_settle_payment(&operator, &payment_id, &splits);
+
+    assert_eq!(result, Err(Ok(Error::PaymentAlreadyProcessed)));
+}
+
+#[test]
+fn test_settle_payment_fails_on_expired_payment() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    let merchant = Address::generate(&env);
+    client.grant_role(&admin, &role_merchant(&env), &merchant);
+
+    let payment_id = String::from_str(&env, "settle_expired");
+    let amount = 1000i128;
+    let expires_at = env.ledger().timestamp() + 3600;
+    let mut args = create_payment_args(&env, &payment_id, &merchant, amount);
+    args.expires_at = Some(expires_at);
+    client.create_payment(&args);
+
+    env.ledger().set_timestamp(expires_at + 1);
+    client.expire_payment(&payment_id);
+
+    let operator = Address::generate(&env);
+    client.grant_role(&admin, &role_settlement_operator(&env), &operator);
+
+    let splits = vec![
+        &env,
+        SettlementSplit {
+            recipient: Address::generate(&env),
+            amount,
+        },
+    ];
+    let result = client.try_settle_payment(&operator, &payment_id, &splits);
+
+    assert_eq!(result, Err(Ok(Error::PaymentAlreadyProcessed)));
+    assert_eq!(
+        client.get_payment(&payment_id).status,
+        PaymentStatus::Expired
+    );
 }
 
 // -----------------------------------------------------------------------------
@@ -3184,4 +3346,19 @@ fn test_settle_payment_emits_fee_collected_event() {
         )
     });
     assert!(found, "PAYMENT/FEE_COLLECTED event should be emitted when fee > 0");
+
+    let settled = events.iter().any(|e| {
+        let topics: soroban_sdk::Vec<soroban_sdk::Val> = e.1;
+        if topics.len() < 2 {
+            return false;
+        }
+        let t0: Result<Symbol, _> = topics.get(0).unwrap().try_into_val(&env);
+        let t1: Result<Symbol, _> = topics.get(1).unwrap().try_into_val(&env);
+        matches!(
+            (t0, t1),
+            (Ok(a), Ok(b))
+                if a == Symbol::new(&env, "PAYMENT") && b == Symbol::new(&env, "SETTLED")
+        )
+    });
+    assert!(settled, "PAYMENT/SETTLED event should be emitted on settlement");
 }

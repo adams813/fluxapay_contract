@@ -2,10 +2,7 @@ use crate::{
     access_control::role_oracle, BillingInterval, Error, RefundManager, RefundManagerClient,
     SubscriptionStatus,
 };
-use soroban_sdk::{
-    testutils::Address as _, testutils::Events, testutils::Ledger, vec, Address, Env, String,
-    Symbol, TryIntoVal,
-};
+use soroban_sdk::{testutils::Address as _, testutils::Events, testutils::Ledger as _, Address, Env, String, Symbol, vec, TryIntoVal};
 
 // ── Shared setup helpers ──────────────────────────────────────────────────────
 
@@ -139,8 +136,14 @@ fn test_subscribe_to_active_plan_creates_subscription_and_emits_event() {
         if topics.len() < 2 {
             return false;
         }
-        let t0: Result<Symbol, _> = topics.get(0).unwrap().try_into_val(&env);
-        let t1: Result<Symbol, _> = topics.get(1).unwrap().try_into_val(&env);
+        let Some(v0) = topics.get(0) else {
+            return false;
+        };
+        let Some(v1) = topics.get(1) else {
+            return false;
+        };
+        let t0: Result<Symbol, _> = v0.try_into_val(&env);
+        let t1: Result<Symbol, _> = v1.try_into_val(&env);
         matches!(
             (t0, t1),
             (Ok(a), Ok(b)) if a == Symbol::new(&env, "SUBSCRIPTION") && b == Symbol::new(&env, "CREATED")
@@ -197,7 +200,8 @@ fn test_resume_subscription_by_payer_becomes_active_with_updated_payment_at() {
     client.pause_subscription(&payer, &sub_id);
 
     // Advance time
-    env.ledger().with_mut(|li| li.timestamp += 1_000);
+    env.ledger()
+        .set_timestamp(env.ledger().timestamp() + 1_000);
 
     let before_resume = env.ledger().timestamp();
     client.resume_subscription(&payer, &sub_id);

@@ -1,10 +1,10 @@
 ﻿use crate::{
-    Dispute, DisputeStatus, PaymentProcessor, PaymentProcessorClient, Refund, RefundManager,
-    RefundManagerClient, RefundStatus,
+    DataKey, Dispute, DisputeStatus, PaymentProcessor, PaymentProcessorClient, Refund,
+    RefundManager, RefundManagerClient, RefundStatus,
 };
 use soroban_sdk::{
     testutils::{Address as _, BytesN as _, Events as _, Ledger as _},
-    token, vec, Address, BytesN, Env, String, Symbol,
+    token, vec, Address, BytesN, Env, String, Symbol, TryIntoVal,
 };
 
 fn setup_contracts(env: &Env) -> (Address, PaymentProcessorClient<'_>, RefundManagerClient<'_>) {
@@ -45,8 +45,162 @@ fn create_payment_args(
         memo_type: None,
         token_address: None,
         client_token: None,
-        metadata_hash: None, metadata: None,
+        metadata_hash: None,
+        metadata: None,
     }
+}
+
+fn setup_open_dispute<'a>(
+    env: &'a Env,
+    payment_id_text: &str,
+) -> (Address, Address, RefundManagerClient<'a>, String) {
+    let (admin, payment_client, refund_client) = setup_contracts(env);
+    let merchant = Address::generate(env);
+    let customer = Address::generate(env);
+    let operator = Address::generate(env);
+    let payment_id = String::from_str(env, payment_id_text);
+    let amount = 1000i128;
+
+    payment_client.grant_role(&admin, &Symbol::new(env, "MERCHANT"), &merchant);
+    payment_client.create_payment(&create_payment_args(env, &payment_id, &merchant, amount));
+
+    let oracle = Address::generate(env);
+    payment_client.grant_role(&admin, &Symbol::new(env, "ORACLE"), &oracle);
+    payment_client.verify_payment(
+        &oracle,
+        &payment_id,
+        &BytesN::from_array(env, &[7u8; 32]),
+        &customer,
+        &amount,
+    );
+
+    let token_address = env.as_contract(&refund_client.address, || {
+        env.storage()
+            .persistent()
+            .get::<DataKey, Address>(&DataKey::UsdcToken)
+            .unwrap()
+    });
+    let token_admin_client = token::StellarAssetClient::new(env, &token_address);
+    token_admin_client.mint(&customer, &100_000);
+    token_admin_client.mint(&merchant, &100_000);
+
+    refund_client.register_payment(&payment_id, &merchant, &amount, &Symbol::new(env, "USDC"));
+    let dispute_id = refund_client.create_dispute(
+        &payment_id,
+        &amount,
+        &String::from_str(env, "Deadline coverage"),
+        &String::from_str(env, "f000000000000000000000000000000000"),
+        &customer,
+        &vec![env],
+    );
+    refund_client.grant_role(
+        &admin,
+        &Symbol::new(env, "SETTLEMENT_OPERATOR"),
+        &operator,
+    );
+
+    (admin, operator, refund_client, dispute_id)
+}
+
+fn has_dispute_event(env: &Env, event_name: &str) -> bool {
+    env.events().all().iter().any(|(_, topics, _)| {
+        if topics.len() != 2 {
+            return false;
+        }
+        let namespace: Result<Symbol, _> = topics.get(0).unwrap().try_into_val(env);
+        let name: Result<Symbol, _> = topics.get(1).unwrap().try_into_val(env);
+        matches!(
+            (namespace, name),
+            (Ok(namespace), Ok(name))
+                if namespace == Symbol::new(env, "DISPUTE")
+                    && name == Symbol::new(env, event_name)
+        )
+    })
+}
+
+#[test]
+fn test_operator_sets_dispute_deadline() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_, operator, refund_client, dispute_id) =
+        setup_open_dispute(&env, "deadline_stored");
+    let deadline = env.ledger().timestamp() + 3600;
+
+    refund_client.set_dispute_deadline(&operator, &dispute_id, &deadline);
+
+    assert!(has_dispute_event(&env, "DEADLINE_SET"));
+    let dispute = refund_client.get_dispute(&dispute_id);
+    assert_eq!(dispute.review_deadline, Some(deadline));
+}
+
+#[test]
+fn test_non_operator_cannot_set_dispute_deadline() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_, _, refund_client, dispute_id) =
+        setup_open_dispute(&env, "deadline_unauthorized");
+    let non_operator = Address::generate(&env);
+
+    let result = refund_client.try_set_dispute_deadline(
+        &non_operator,
+        &dispute_id,
+        &(env.ledger().timestamp() + 3600),
+    );
+
+    assert_eq!(result, Err(Ok(crate::Error::Unauthorized)));
+}
+
+#[test]
+fn test_past_dispute_deadline_escalates_immediately() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(100);
+    let (_, operator, refund_client, dispute_id) =
+        setup_open_dispute(&env, "deadline_past");
+
+    refund_client.set_dispute_deadline(&operator, &dispute_id, &99);
+
+    assert!(has_dispute_event(&env, "ESCALATED"));
+    let dispute = refund_client.get_dispute(&dispute_id);
+    assert!(dispute.escalated);
+}
+
+#[test]
+fn test_future_dispute_deadline_does_not_escalate() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_, operator, refund_client, dispute_id) =
+        setup_open_dispute(&env, "deadline_future");
+
+    refund_client.set_dispute_deadline(
+        &operator,
+        &dispute_id,
+        &(env.ledger().timestamp() + 3600),
+    );
+
+    assert!(!refund_client.get_dispute(&dispute_id).escalated);
+}
+
+#[test]
+fn test_cannot_set_deadline_on_resolved_dispute() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_, operator, refund_client, dispute_id) =
+        setup_open_dispute(&env, "deadline_resolved");
+    refund_client.reject_dispute(
+        &operator,
+        &dispute_id,
+        &String::from_str(&env, "Resolved"),
+        &String::from_str(&env, "operator-signature"),
+    );
+
+    let result = refund_client.try_set_dispute_deadline(
+        &operator,
+        &dispute_id,
+        &(env.ledger().timestamp() + 3600),
+    );
+
+    assert_eq!(result, Err(Ok(crate::Error::DisputeAlreadyResolved)));
 }
 
 #[test]

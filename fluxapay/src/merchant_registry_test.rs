@@ -1655,11 +1655,7 @@ fn test_unchanged_payout_address_produces_no_history_and_no_event() {
     );
 
     let history = client.get_payout_history(&merchant_id);
-    assert_eq!(
-        history.len(),
-        0,
-        "Expected no history when address is unchanged"
-    );
+    assert_eq!(history.len(), 0, "Expected no history when address is unchanged");
 
     // Count PAYOUT_UPDATED events — should be zero
     let events = env.events().all();

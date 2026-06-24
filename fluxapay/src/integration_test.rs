@@ -1,7 +1,7 @@
 ﻿use crate::{
     merchant_registry::{KycTier, MerchantRegistry, MerchantRegistryClient},
-    DisputeStatus, PaymentProcessor, PaymentProcessorClient, PaymentStatus, RefundManager,
-    RefundManagerClient, RefundStatus, SettlementSplit,
+    DataKey, DisputeStatus, Error, PaymentProcessor, PaymentProcessorClient, PaymentStatus,
+    RefundManager, RefundManagerClient, RefundStatus, SettlementSplit,
 };
 use soroban_sdk::{
     testutils::{Address as _, BytesN as _, Ledger as _},
@@ -37,6 +37,149 @@ fn setup_integration(
     merchant_client.initialize(&admin);
 
     (admin, payment_client, refund_client, merchant_client)
+}
+
+fn integration_payment_args(
+    env: &Env,
+    payment_id: &str,
+    merchant_id: &Address,
+) -> crate::CreatePaymentArgs {
+    crate::CreatePaymentArgs {
+        payment_id: String::from_str(env, payment_id),
+        merchant_id: merchant_id.clone(),
+        amount: 1000,
+        currency: Symbol::new(env, "USDC"),
+        deposit_address: Address::generate(env),
+        expires_at: Some(env.ledger().timestamp() + 3600),
+        duration_secs: None,
+        memo: None,
+        memo_type: None,
+        token_address: None,
+        client_token: None,
+        metadata_hash: None,
+        metadata: None,
+    }
+}
+
+#[test]
+fn test_admin_sets_merchant_registry_address() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, payment_client, _, merchant_client) = setup_integration(&env);
+
+    payment_client.set_merchant_registry_address(&admin, &merchant_client.address);
+
+    let stored = env.as_contract(&payment_client.address, || {
+        env.storage()
+            .persistent()
+            .get::<DataKey, Address>(&DataKey::MerchantRegistryAddress)
+    });
+    assert_eq!(stored, Some(merchant_client.address));
+}
+
+#[test]
+fn test_non_admin_cannot_set_merchant_registry_address() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_, payment_client, _, merchant_client) = setup_integration(&env);
+    let non_admin = Address::generate(&env);
+
+    let result =
+        payment_client.try_set_merchant_registry_address(&non_admin, &merchant_client.address);
+
+    assert_eq!(result, Err(Ok(Error::Unauthorized)));
+}
+
+#[test]
+fn test_create_payment_with_verified_registry_merchant_succeeds() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, payment_client, _, merchant_client) = setup_integration(&env);
+    let merchant = Address::generate(&env);
+
+    merchant_client.register_merchant(
+        &merchant,
+        &String::from_str(&env, "Verified Merchant"),
+        &String::from_str(&env, "USD"),
+        &None,
+        &None,
+        &None,
+    );
+    merchant_client.verify_merchant(&admin, &merchant);
+    payment_client.grant_role(&admin, &Symbol::new(&env, "MERCHANT"), &merchant);
+    payment_client.set_merchant_registry_address(&admin, &merchant_client.address);
+
+    let payment =
+        payment_client.create_payment(&integration_payment_args(&env, "REG_VERIFIED", &merchant));
+    assert_eq!(payment.status, PaymentStatus::Pending);
+}
+
+#[test]
+fn test_create_payment_with_unverified_registry_merchant_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, payment_client, _, merchant_client) = setup_integration(&env);
+    let merchant = Address::generate(&env);
+
+    merchant_client.register_merchant(
+        &merchant,
+        &String::from_str(&env, "Unverified Merchant"),
+        &String::from_str(&env, "USD"),
+        &None,
+        &None,
+        &None,
+    );
+    payment_client.grant_role(&admin, &Symbol::new(&env, "MERCHANT"), &merchant);
+    payment_client.set_merchant_registry_address(&admin, &merchant_client.address);
+
+    let result = payment_client
+        .try_create_payment(&integration_payment_args(&env, "REG_UNVERIFIED", &merchant));
+    assert_eq!(result, Err(Ok(Error::Unauthorized)));
+}
+
+#[test]
+fn test_create_payment_with_suspended_registry_merchant_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, payment_client, _, merchant_client) = setup_integration(&env);
+    let merchant = Address::generate(&env);
+
+    merchant_client.register_merchant(
+        &merchant,
+        &String::from_str(&env, "Suspended Merchant"),
+        &String::from_str(&env, "USD"),
+        &None,
+        &None,
+        &None,
+    );
+    merchant_client.verify_merchant(&admin, &merchant);
+    merchant_client.suspend_merchant(
+        &admin,
+        &merchant,
+        &String::from_str(&env, "Compliance hold"),
+        &3600,
+    );
+    payment_client.grant_role(&admin, &Symbol::new(&env, "MERCHANT"), &merchant);
+    payment_client.set_merchant_registry_address(&admin, &merchant_client.address);
+
+    let result = payment_client
+        .try_create_payment(&integration_payment_args(&env, "REG_SUSPENDED", &merchant));
+    assert_eq!(result, Err(Ok(Error::Unauthorized)));
+}
+
+#[test]
+fn test_create_payment_with_unregistered_registry_merchant_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, payment_client, _, merchant_client) = setup_integration(&env);
+    let merchant = Address::generate(&env);
+
+    payment_client.grant_role(&admin, &Symbol::new(&env, "MERCHANT"), &merchant);
+    payment_client.set_merchant_registry_address(&admin, &merchant_client.address);
+
+    let result =
+        payment_client.try_create_payment(&integration_payment_args(&env, "REG_MISSING", &merchant));
+    assert_eq!(result, Err(Ok(Error::Unauthorized)));
 }
 
 #[test]
