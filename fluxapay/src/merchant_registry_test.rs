@@ -1522,7 +1522,7 @@ fn test_first_payout_address_set_produces_no_history() {
     assert_eq!(merchant.payout_address, Some(new_addr));
 
     // History is empty because there was no prior address
-    let history = client.get_payout_history(&merchant_id).unwrap();
+    let history = client.get_payout_history(&merchant_id);
     assert_eq!(history.len(), 0, "Expected no history on first set");
 }
 
@@ -1565,7 +1565,7 @@ fn test_payout_address_update_appends_old_to_history_and_emits_event() {
     let merchant = client.get_merchant(&merchant_id);
     assert_eq!(merchant.payout_address, Some(second_addr.clone()));
 
-    let history = client.get_payout_history(&merchant_id).unwrap();
+    let history = client.get_payout_history(&merchant_id);
     assert_eq!(history.len(), 1, "Expected one history entry");
     assert_eq!(history.get(0).unwrap(), first_addr);
 
@@ -1622,7 +1622,7 @@ fn test_unchanged_payout_address_produces_no_history_and_no_event() {
         &None,
     );
 
-    let history = client.get_payout_history(&merchant_id).unwrap();
+    let history = client.get_payout_history(&merchant_id);
     assert_eq!(history.len(), 0, "Expected no history when address is unchanged");
 
     // Count PAYOUT_UPDATED events — should be zero
@@ -1689,7 +1689,7 @@ fn test_get_payout_history_returns_all_previous_addresses_in_order() {
         &None,
     );
 
-    let history = client.get_payout_history(&merchant_id).unwrap();
+    let history = client.get_payout_history(&merchant_id);
     assert_eq!(history.len(), 2, "Expected two history entries");
     assert_eq!(history.get(0).unwrap(), addr1, "First history entry should be addr1");
     assert_eq!(history.get(1).unwrap(), addr2, "Second history entry should be addr2");
