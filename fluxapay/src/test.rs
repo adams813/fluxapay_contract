@@ -1799,6 +1799,24 @@ fn test_get_merchant_and_global_limits() {
 // --- Multi-asset payment tests ---
 
 #[test]
+fn test_allow_token_unauthorized_non_admin() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_admin, client) = setup_payment_processor(&env);
+
+    let token_admin = Address::generate(&env);
+    let token = env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
+    let non_admin = Address::generate(&env);
+
+    let result = client.try_allow_token(&non_admin, &token);
+
+    assert_eq!(result, Err(Ok(Error::Unauthorized)));
+    assert!(!client.is_token_allowed(&token));
+}
+
+#[test]
 fn test_create_payment_with_allowed_token() {
     let env = Env::default();
     env.mock_all_auths();
