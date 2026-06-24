@@ -109,6 +109,8 @@ pub enum MerchantDataKey {
     FeeConfig,
     /// Address of the PaymentProcessor contract for automatic KYC tier upgrades (issue #207)
     PaymentProcessorAddress,
+    /// Ordered list of previous payout addresses for a merchant (audit trail).
+    MerchantPayoutHistory(Address),
 }
 
 /// Platform fee configuration stored in MerchantRegistry.
@@ -242,7 +244,7 @@ impl MerchantRegistry {
                     return Err(MerchantError::PayoutAddressNotWhitelisted);
                 }
             }
-            
+
             // Enforce 48-hour delay on payout address changes (issue #212)
             let current_time = env.ledger().timestamp();
             let forty_eight_hours = 48 * 60 * 60; // 48 hours in seconds
@@ -251,7 +253,33 @@ impl MerchantRegistry {
                     return Err(MerchantError::Unauthorized); // Reuse Unauthorized error or create new one
                 }
             }
-            
+
+            // Track payout address history: append the old address before overwriting.
+            let old_payout = merchant.payout_address.clone();
+            if old_payout != Some(addr.clone()) {
+                if let Some(ref old_addr) = old_payout {
+                    // Append old address to history list
+                    let history_key =
+                        MerchantDataKey::MerchantPayoutHistory(merchant_id.clone());
+                    let mut history: Vec<Address> = env
+                        .storage()
+                        .persistent()
+                        .get(&history_key)
+                        .unwrap_or_else(|| vec![&env]);
+                    history.push_back(old_addr.clone());
+                    env.storage().persistent().set(&history_key, &history);
+
+                    // Emit specific PAYOUT_UPDATED event with old and new addresses.
+                    env.events().publish(
+                        (
+                            Symbol::new(&env, "MERCHANT"),
+                            Symbol::new(&env, "PAYOUT_UPDATED"),
+                        ),
+                        (merchant_id.clone(), old_addr.clone(), addr.clone()),
+                    );
+                }
+            }
+
             merchant.payout_address = Some(addr);
             merchant.last_payout_change_at = Some(current_time);
         }
@@ -272,6 +300,25 @@ impl MerchantRegistry {
         );
 
         Ok(())
+    }
+
+    /// Return the ordered list of previous payout addresses for a merchant.
+    ///
+    /// Each entry was the active `payout_address` immediately before it was
+    /// changed; the list is in chronological order (oldest first).
+    /// Returns an empty list if the address has never been changed.
+    pub fn get_payout_history(
+        env: Env,
+        merchant_id: Address,
+    ) -> Result<Vec<Address>, MerchantError> {
+        // Ensure the merchant exists before returning history.
+        Self::get_merchant_internal(&env, &merchant_id)?;
+        let history: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&MerchantDataKey::MerchantPayoutHistory(merchant_id))
+            .unwrap_or_else(|| vec![&env]);
+        Ok(history)
     }
 
     /// Merchant can toggle whether partial payments are accepted.
