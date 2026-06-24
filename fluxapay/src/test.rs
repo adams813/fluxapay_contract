@@ -1799,6 +1799,24 @@ fn test_get_merchant_and_global_limits() {
 // --- Multi-asset payment tests ---
 
 #[test]
+fn test_allow_token_unauthorized_non_admin() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_admin, client) = setup_payment_processor(&env);
+
+    let token_admin = Address::generate(&env);
+    let token = env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
+    let non_admin = Address::generate(&env);
+
+    let result = client.try_allow_token(&non_admin, &token);
+
+    assert_eq!(result, Err(Ok(Error::Unauthorized)));
+    assert!(!client.is_token_allowed(&token));
+}
+
+#[test]
 fn test_create_payment_with_allowed_token() {
     let env = Env::default();
     env.mock_all_auths();
@@ -2324,6 +2342,100 @@ fn test_settle_payment_split_total_mismatch_fails() {
     ];
     let result = client.try_settle_payment(&operator, &payment_id, &splits);
     assert_eq!(result, Err(Ok(Error::InvalidSettlement)));
+}
+
+#[test]
+fn test_settle_payment_unauthorized_non_operator() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    let payment_id = String::from_str(&env, "settle_unauth");
+    let amount = 1000i128;
+    make_confirmed_payment(&env, &client, &admin, &payment_id, amount);
+
+    let non_operator = Address::generate(&env);
+    let splits = vec![
+        &env,
+        SettlementSplit {
+            recipient: Address::generate(&env),
+            amount,
+        },
+    ];
+    let result = client.try_settle_payment(&non_operator, &payment_id, &splits);
+
+    assert_eq!(result, Err(Ok(Error::Unauthorized)));
+    assert_eq!(
+        client.get_payment(&payment_id).status,
+        PaymentStatus::Confirmed
+    );
+}
+
+#[test]
+fn test_settle_payment_fails_on_pending_payment() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    let merchant = Address::generate(&env);
+    client.grant_role(&admin, &role_merchant(&env), &merchant);
+
+    let payment_id = String::from_str(&env, "settle_pending");
+    let amount = 1000i128;
+    let args = create_payment_args(&env, &payment_id, &merchant, amount);
+    client.create_payment(&args);
+
+    let operator = Address::generate(&env);
+    client.grant_role(&admin, &role_settlement_operator(&env), &operator);
+
+    let splits = vec![
+        &env,
+        SettlementSplit {
+            recipient: Address::generate(&env),
+            amount,
+        },
+    ];
+    let result = client.try_settle_payment(&operator, &payment_id, &splits);
+
+    assert_eq!(result, Err(Ok(Error::PaymentAlreadyProcessed)));
+}
+
+#[test]
+fn test_settle_payment_fails_on_expired_payment() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    let merchant = Address::generate(&env);
+    client.grant_role(&admin, &role_merchant(&env), &merchant);
+
+    let payment_id = String::from_str(&env, "settle_expired");
+    let amount = 1000i128;
+    let expires_at = env.ledger().timestamp() + 3600;
+    let mut args = create_payment_args(&env, &payment_id, &merchant, amount);
+    args.expires_at = Some(expires_at);
+    client.create_payment(&args);
+
+    env.ledger().set_timestamp(expires_at + 1);
+    client.expire_payment(&payment_id);
+
+    let operator = Address::generate(&env);
+    client.grant_role(&admin, &role_settlement_operator(&env), &operator);
+
+    let splits = vec![
+        &env,
+        SettlementSplit {
+            recipient: Address::generate(&env),
+            amount,
+        },
+    ];
+    let result = client.try_settle_payment(&operator, &payment_id, &splits);
+
+    assert_eq!(result, Err(Ok(Error::PaymentAlreadyProcessed)));
+    assert_eq!(
+        client.get_payment(&payment_id).status,
+        PaymentStatus::Expired
+    );
 }
 
 // -----------------------------------------------------------------------------
@@ -3184,4 +3296,19 @@ fn test_settle_payment_emits_fee_collected_event() {
         )
     });
     assert!(found, "PAYMENT/FEE_COLLECTED event should be emitted when fee > 0");
+
+    let settled = events.iter().any(|e| {
+        let topics: soroban_sdk::Vec<soroban_sdk::Val> = e.1;
+        if topics.len() < 2 {
+            return false;
+        }
+        let t0: Result<Symbol, _> = topics.get(0).unwrap().try_into_val(&env);
+        let t1: Result<Symbol, _> = topics.get(1).unwrap().try_into_val(&env);
+        matches!(
+            (t0, t1),
+            (Ok(a), Ok(b))
+                if a == Symbol::new(&env, "PAYMENT") && b == Symbol::new(&env, "SETTLED")
+        )
+    });
+    assert!(settled, "PAYMENT/SETTLED event should be emitted on settlement");
 }
