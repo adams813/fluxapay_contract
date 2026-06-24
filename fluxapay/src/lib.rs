@@ -629,6 +629,8 @@ pub enum DataKey {
     ReentrancyLock,
     /// Contract version string, updated on each successful upgrade.
     ContractVersion,
+    /// Configurable settlement fee rate in basis points (issue: settle_payment fee).
+    SettlementFeeRate,
 }
 
 /// Default initial contract version string.
@@ -3722,6 +3724,39 @@ impl PaymentProcessor {
         Ok(())
     }
 
+    /// Set the settlement fee rate (in basis points) deducted from each payment
+    /// during `settle_payment` and accumulated in `TreasuryBalance`.
+    ///
+    /// Only the admin may call this function. A rate of 0 disables the fee.
+    ///
+    /// # Arguments
+    /// * `admin` – Must hold the admin role.
+    /// * `bps`   – Fee in basis points (e.g. 100 = 1 %). Must be 0–10 000.
+    pub fn set_fee_rate(env: Env, admin: Address, bps: i128) -> Result<(), Error> {
+        admin.require_auth();
+
+        if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
+            return Err(Error::Unauthorized);
+        }
+
+        if bps < 0 || bps > 10_000 {
+            return Err(Error::InvalidAmount);
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::SettlementFeeRate, &bps);
+        Ok(())
+    }
+
+    /// Return the accumulated treasury balance collected via settlement fees.
+    pub fn get_treasury_balance(env: Env) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::TreasuryBalance)
+            .unwrap_or(0)
+    }
+
     pub fn set_global_rate_limit(
         env: Env,
         admin: Address,
@@ -5042,6 +5077,43 @@ impl PaymentProcessor {
             return Err(Error::InvalidSettlement);
         }
 
+        // ── Configurable settlement fee (accumulated in TreasuryBalance) ─────────
+        // Read the settlement fee rate in basis points. 0 bps → no fee, no event.
+        let settlement_fee_bps: i128 = env
+            .storage()
+            .persistent()
+            .get::<DataKey, i128>(&DataKey::SettlementFeeRate)
+            .unwrap_or(0);
+
+        let settlement_fee: i128 = if settlement_fee_bps > 0 {
+            payment.amount * settlement_fee_bps / 10_000
+        } else {
+            0
+        };
+
+        if settlement_fee > 0 {
+            // Accumulate fee in TreasuryBalance (not forwarded immediately)
+            let current_treasury: i128 = env
+                .storage()
+                .persistent()
+                .get::<DataKey, i128>(&DataKey::TreasuryBalance)
+                .unwrap_or(0);
+            env.storage()
+                .persistent()
+                .set(&DataKey::TreasuryBalance, &current_treasury.saturating_add(settlement_fee));
+
+            env.events().publish(
+                (
+                    Symbol::new(&env, "PAYMENT"),
+                    Symbol::new(&env, "FEE_COLLECTED"),
+                ),
+                (payment_id.clone(), payment.merchant_id.clone(), settlement_fee),
+            );
+        }
+
+        // Net amount after settlement fee
+        let net_after_settlement_fee = payment.amount.saturating_sub(settlement_fee);
+
         // Check if merchant registry is configured and merchant has FeeConfig
         let registry_address = env
             .storage()
@@ -5056,18 +5128,18 @@ impl PaymentProcessor {
             let merchant = registry_client.get_merchant(&payment.merchant_id);
             if let Some(fee_config) = merchant.fee_config.as_option() {
                     // Calculate fee using merchant's FeeConfig
-                    let fee_bps_amount = (payment.amount * (fee_config.platform_fee_bps as i128)) / 10_000;
+                    let fee_bps_amount = (net_after_settlement_fee * (fee_config.platform_fee_bps as i128)) / 10_000;
                     let fixed_fee = fee_config.fixed_fee;
                     let total_merchant_fee = fee_bps_amount.saturating_add(fixed_fee);
 
                     // Ensure fee doesn't exceed amount
-                    let actual_fee = if total_merchant_fee >= payment.amount {
-                        payment.amount
+                    let actual_fee = if total_merchant_fee >= net_after_settlement_fee {
+                        net_after_settlement_fee
                     } else {
                         total_merchant_fee
                     };
 
-                    let net_merchant_amount = payment.amount.saturating_sub(actual_fee);
+                    let net_merchant_amount = net_after_settlement_fee.saturating_sub(actual_fee);
 
                     // Get fee recipient
                     let fee_recipient: Address = if let Some(custom_recipient) = &fee_config.fee_recipient {
@@ -5097,7 +5169,7 @@ impl PaymentProcessor {
                         }
                     }
 
-                    // Emit FEE_COLLECTED event
+                    // Emit FEE_COLLECTED event (merchant-level fee)
                     env.events().publish(
                         (
                             Symbol::new(&env, "PAYMENT"),
@@ -5132,12 +5204,12 @@ impl PaymentProcessor {
         {
             let registry_client =
                 crate::merchant_registry::MerchantRegistryClient::new(&env, &registry_address);
-            registry_client.calculate_platform_fee(&payment.amount)
+            registry_client.calculate_platform_fee(&net_after_settlement_fee)
         } else {
             (0i128, env.current_contract_address())
         };
 
-        let net_amount = payment.amount - platform_fee;
+        let net_amount = net_after_settlement_fee - platform_fee;
 
         // Verify split amounts are positive and total matches net amount after fee
         let mut total: i128 = 0;

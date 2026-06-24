@@ -4,7 +4,7 @@ use super::*;
 use access_control::{role_admin, role_oracle, role_settlement_operator};
 use soroban_sdk::{
     testutils::{Address as _, BytesN as _, Events as _, Ledger as _},
-    token, vec, Address, BytesN, Env, String, Symbol,
+    token, vec, Address, BytesN, Env, String, Symbol, TryIntoVal,
 };
 
 #[test]
@@ -3019,4 +3019,183 @@ fn test_version_after_init() {
 
     let get_ver: soroban_sdk::String = client.get_version();
     assert_eq!(get_ver, String::from_str(&env, "1.0.0"));
+}
+
+// =============================================================================
+// Settlement fee rate (set_fee_rate / get_treasury_balance) tests
+// =============================================================================
+
+/// set_fee_rate stores the rate and settle_payment deducts the correct fee,
+/// accumulating it in TreasuryBalance.
+#[test]
+fn test_settle_payment_deducts_fee_and_accumulates_in_treasury() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    // Set 100 bps = 1% settlement fee
+    client.set_fee_rate(&admin, &100i128);
+
+    let payment_id = String::from_str(&env, "settle_fee_basic");
+    let amount = 10_000i128;
+    make_confirmed_payment(&env, &client, &admin, &payment_id, amount);
+
+    let operator = Address::generate(&env);
+    client.grant_role(&admin, &role_settlement_operator(&env), &operator);
+
+    // Splits should cover amount - fee = 10000 - 100 = 9900
+    let splits = vec![
+        &env,
+        SettlementSplit {
+            recipient: Address::generate(&env),
+            amount: 9_900i128,
+        },
+    ];
+    client.settle_payment(&operator, &payment_id, &splits);
+
+    // Payment should be Settled
+    assert_eq!(
+        client.get_payment(&payment_id).status,
+        PaymentStatus::Settled
+    );
+
+    // Treasury should have accumulated the 100-unit fee
+    let treasury = client.get_treasury_balance();
+    assert_eq!(treasury, 100i128, "Treasury should hold the deducted fee");
+}
+
+/// A 0 bps fee rate results in no deduction, no FEE_COLLECTED event, and no
+/// treasury balance change.
+#[test]
+fn test_settle_payment_zero_fee_rate_no_deduction_no_event() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    // Explicitly set 0 bps (or simply don't set it — default is 0)
+    client.set_fee_rate(&admin, &0i128);
+
+    let payment_id = String::from_str(&env, "settle_zero_fee");
+    let amount = 5_000i128;
+    make_confirmed_payment(&env, &client, &admin, &payment_id, amount);
+
+    let operator = Address::generate(&env);
+    client.grant_role(&admin, &role_settlement_operator(&env), &operator);
+
+    // Splits cover the full amount (no fee)
+    let splits = vec![
+        &env,
+        SettlementSplit {
+            recipient: Address::generate(&env),
+            amount,
+        },
+    ];
+    client.settle_payment(&operator, &payment_id, &splits);
+
+    assert_eq!(
+        client.get_payment(&payment_id).status,
+        PaymentStatus::Settled
+    );
+
+    // No fee should have been collected
+    let treasury = client.get_treasury_balance();
+    assert_eq!(treasury, 0i128, "Treasury should be 0 when fee rate is 0");
+
+    // No PAYMENT/FEE_COLLECTED event should have been emitted
+    let events = env.events().all();
+    let fee_event_count = events.iter().filter(|e| {
+        let topics: soroban_sdk::Vec<soroban_sdk::Val> = e.1.clone();
+        if topics.len() < 2 {
+            return false;
+        }
+        let t0: Result<Symbol, _> = topics.get(0).unwrap().try_into_val(&env);
+        let t1: Result<Symbol, _> = topics.get(1).unwrap().try_into_val(&env);
+        matches!(
+            (t0, t1),
+            (Ok(a), Ok(b))
+                if a == Symbol::new(&env, "PAYMENT") && b == Symbol::new(&env, "FEE_COLLECTED")
+        )
+    }).count();
+    assert_eq!(fee_event_count, 0, "Expected no FEE_COLLECTED event when fee rate is 0");
+}
+
+/// Only admin can call set_fee_rate; non-admin gets Unauthorized.
+#[test]
+fn test_set_fee_rate_requires_admin() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_admin, client) = setup_payment_processor(&env);
+
+    let non_admin = Address::generate(&env);
+    let result = client.try_set_fee_rate(&non_admin, &50i128);
+
+    assert_eq!(result, Err(Ok(Error::Unauthorized)));
+}
+
+/// Treasury balance accumulates across multiple settlements.
+#[test]
+fn test_treasury_balance_accumulates_across_multiple_settlements() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    // 200 bps = 2%
+    client.set_fee_rate(&admin, &200i128);
+
+    let operator = Address::generate(&env);
+    client.grant_role(&admin, &role_settlement_operator(&env), &operator);
+
+    // First settlement: 10_000 → fee = 200
+    let pid1 = String::from_str(&env, "settle_acc_1");
+    make_confirmed_payment(&env, &client, &admin, &pid1, 10_000i128);
+    let splits1 = vec![&env, SettlementSplit { recipient: Address::generate(&env), amount: 9_800i128 }];
+    client.settle_payment(&operator, &pid1, &splits1);
+
+    // Second settlement: 5_000 → fee = 100
+    let pid2 = String::from_str(&env, "settle_acc_2");
+    make_confirmed_payment(&env, &client, &admin, &pid2, 5_000i128);
+    let splits2 = vec![&env, SettlementSplit { recipient: Address::generate(&env), amount: 4_900i128 }];
+    client.settle_payment(&operator, &pid2, &splits2);
+
+    // Total treasury = 200 + 100 = 300
+    let treasury = client.get_treasury_balance();
+    assert_eq!(treasury, 300i128, "Treasury should accumulate fees from all settlements");
+}
+
+/// PAYMENT/FEE_COLLECTED event is emitted when a non-zero fee is deducted.
+#[test]
+fn test_settle_payment_emits_fee_collected_event() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    client.set_fee_rate(&admin, &500i128); // 5%
+
+    let payment_id = String::from_str(&env, "settle_fee_event");
+    let amount = 2_000i128;
+    make_confirmed_payment(&env, &client, &admin, &payment_id, amount);
+
+    let operator = Address::generate(&env);
+    client.grant_role(&admin, &role_settlement_operator(&env), &operator);
+
+    // fee = 5% of 2000 = 100; splits cover remainder = 1900
+    let splits = vec![&env, SettlementSplit { recipient: Address::generate(&env), amount: 1_900i128 }];
+    client.settle_payment(&operator, &payment_id, &splits);
+
+    // Verify PAYMENT/FEE_COLLECTED event was emitted
+    let events = env.events().all();
+    let found = events.iter().any(|e| {
+        let topics: soroban_sdk::Vec<soroban_sdk::Val> = e.1;
+        if topics.len() < 2 {
+            return false;
+        }
+        let t0: Result<Symbol, _> = topics.get(0).unwrap().try_into_val(&env);
+        let t1: Result<Symbol, _> = topics.get(1).unwrap().try_into_val(&env);
+        matches!(
+            (t0, t1),
+            (Ok(a), Ok(b))
+                if a == Symbol::new(&env, "PAYMENT") && b == Symbol::new(&env, "FEE_COLLECTED")
+        )
+    });
+    assert!(found, "PAYMENT/FEE_COLLECTED event should be emitted when fee > 0");
 }
