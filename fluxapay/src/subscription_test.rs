@@ -22,22 +22,11 @@ fn setup_refund_manager(env: &Env) -> (Address, RefundManagerClient<'_>) {
 
 /// Create a merchant with MERCHANT role and a subscription plan, returning
 /// `(client, admin, merchant, plan_id)`.
-fn setup_with_plan(
-    env: &Env,
-) -> (
-    RefundManagerClient<'_>,
-    Address,
-    Address,
-    String,
-) {
+fn setup_with_plan(env: &Env) -> (RefundManagerClient<'_>, Address, Address, String) {
     let (admin, client) = setup_refund_manager(env);
 
     let merchant = Address::generate(env);
-    client.grant_role(
-        &admin,
-        &Symbol::new(env, "MERCHANT"),
-        &merchant,
-    );
+    client.grant_role(&admin, &Symbol::new(env, "MERCHANT"), &merchant);
 
     let plan_id = String::from_str(env, "plan_weekly");
     client.create_subscription_plan(
@@ -175,7 +164,10 @@ fn test_subscribe_to_inactive_plan_fails() {
 
     let payer = Address::generate(&env);
     let result = client.try_subscribe(&payer, &plan_id, &None, &None, &None);
-    assert!(result.is_err(), "Expected error when subscribing to inactive plan");
+    assert!(
+        result.is_err(),
+        "Expected error when subscribing to inactive plan"
+    );
 }
 
 /// Payer can pause an active subscription and it becomes Paused.
@@ -264,8 +256,14 @@ fn test_get_payer_subscriptions_returns_all_for_payer() {
         }
         v
     };
-    assert!(ids.contains(&sub_id_1), "sub_id_1 not found in payer subscriptions");
-    assert!(ids.contains(&sub_id_2), "sub_id_2 not found in payer subscriptions");
+    assert!(
+        ids.contains(&sub_id_1),
+        "sub_id_1 not found in payer subscriptions"
+    );
+    assert!(
+        ids.contains(&sub_id_2),
+        "sub_id_2 not found in payer subscriptions"
+    );
 }
 
 /// Merchant can deactivate a plan; subsequent subscribe attempts fail.
