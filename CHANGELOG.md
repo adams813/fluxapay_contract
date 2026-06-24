@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- `allow_token` unauthorized non-admin test for token allowlist enforcement (closes #328)
 - `settle_payment` tests for unauthorized operators, pending/expired rejection, and `PAYMENT/SETTLED` event emission (closes #326)
 - `get_merchant_payments_paginated` optional `status_filter` parameter to paginate merchant payments by `PaymentStatus` (closes #280)
 - `scripts/deploy_testnet.sh`: builds all contract WASMs and deploys them to the configured Stellar network; writes resulting contract IDs to `.env.testnet`; fails fast if `STELLAR_SECRET_KEY` or `STELLAR_NETWORK` are unset (closes #294)
