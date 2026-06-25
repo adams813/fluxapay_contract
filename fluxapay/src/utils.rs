@@ -51,6 +51,27 @@ pub fn validate_ipfs_multihash(s: &String) -> bool {
     false
 }
 
+/// Validates a user-supplied ID (payment_id, dispute_id, etc.).
+///
+/// Rules (issue #404):
+/// - Length: 3–64 characters (inclusive)
+/// - Allowed characters: ASCII alphanumeric, `-`, `_`
+pub fn validate_id(s: &String) -> bool {
+    let len = s.len() as usize;
+    if len < 3 || len > 64 {
+        return false;
+    }
+    let mut buf = [0u8; 64];
+    s.copy_into_slice(&mut buf[..len]);
+    for b in buf[..len].iter() {
+        let valid = b.is_ascii_alphanumeric() || *b == b'-' || *b == b'_';
+        if !valid {
+            return false;
+        }
+    }
+    true
+}
+
 /// Converts a `u64` counter to a Soroban `String` with the given prefix.
 ///
 /// Examples: `format_id(env, "refund_", 1)` → `"refund_1"`
