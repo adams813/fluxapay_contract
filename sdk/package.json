@@ -23,7 +23,7 @@
   "author": "FluxaPay Team",
   "license": "MIT",
   "dependencies": {
-    "@stellar/stellar-sdk": "^13.0.0"
+    "@stellar/stellar-sdk": "^16.0.1"
   },
   "devDependencies": {
     "typescript": "^5.0.0",
