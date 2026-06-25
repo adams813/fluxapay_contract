@@ -1643,6 +1643,11 @@ impl RefundManager {
     ) -> Result<String, Error> {
         disputer.require_auth();
 
+        // Issue #404: Validate payment_id format
+        if !utils::validate_id(&payment_id) {
+            return Err(Error::InvalidPaymentId);
+        }
+
         if amount <= 0 {
             return Err(Error::InvalidAmount);
         }
@@ -3815,6 +3820,16 @@ impl PaymentProcessor {
             .map_err(|_| Error::AccessControlError)
     }
 
+    /// Returns whether `account` holds `role` on this contract (issue #401).
+    pub fn has_role(env: Env, role: Symbol, account: Address) -> bool {
+        AccessControl::has_role(&env, &role, &account)
+    }
+
+    /// Returns all addresses currently holding `role` on this contract (issue #401).
+    pub fn get_role_members(env: Env, role: Symbol) -> Vec<Address> {
+        AccessControl::get_role_members(&env, &role)
+    }
+
     /// Set the global paused state (admin only). When paused, create_payment, verify_payment, and cancel_payment are blocked.
     pub fn set_global_pause(
         env: Env,
@@ -4420,7 +4435,7 @@ impl PaymentProcessor {
             return Err(Error::PaymentAlreadyExists);
         }
 
-        if args.payment_id.is_empty() {
+        if !utils::validate_id(&args.payment_id) {
             return Err(Error::InvalidPaymentId);
         }
 
@@ -6087,6 +6102,7 @@ mod subscription_test;
 pub mod utils;
 pub use utils::format_id;
 pub use utils::validate_ipfs_multihash;
+pub use utils::validate_id;
 
 pub mod gas_estimator;
 pub use gas_estimator::{CostEstimate, GasEstimator, GasEstimatorClient, Operation};

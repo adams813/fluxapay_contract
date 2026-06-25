@@ -1,4 +1,5 @@
 ﻿use crate::format_id;
+use crate::utils::validate_id;
 use proptest::prelude::*;
 use soroban_sdk::{
     testutils::{Address as _, BytesN as _, Ledger as _},
@@ -165,5 +166,53 @@ proptest! {
         };
 
         assert_eq!(status, expected);
+    }
+
+    #[test]
+    fn test_validate_id_valid_chars(
+        prefix in "[a-zA-Z0-9]{1,20}",
+        suffix in "[a-zA-Z0-9_-]{0,20}",
+    ) {
+        let env = Env::default();
+        let combined = format!("{}{}", prefix, suffix);
+        // Only test strings in the 3-64 char range
+        prop_assume!(combined.len() >= 3 && combined.len() <= 64);
+        let s = soroban_sdk::String::from_str(&env, &combined);
+        assert!(validate_id(&s), "expected valid id: {}", combined);
+    }
+
+    #[test]
+    fn test_validate_id_rejects_too_short(s in "[a-z]{0,2}") {
+        let env = Env::default();
+        let id = soroban_sdk::String::from_str(&env, &s);
+        assert!(!validate_id(&id), "expected invalid (too short): {}", s);
+    }
+
+    #[test]
+    fn test_validate_id_rejects_too_long(extra in "[a-z]{1,10}") {
+        let env = Env::default();
+        // Build a 65+ char string
+        let base = "a".repeat(64);
+        let long_str = format!("{}{}", base, extra);
+        let id = soroban_sdk::String::from_str(&env, &long_str);
+        assert!(!validate_id(&id), "expected invalid (too long)");
+    }
+
+    #[test]
+    fn test_validate_id_rejects_disallowed_chars(
+        valid in "[a-zA-Z0-9_-]{2,30}",
+        bad_char in "[^a-zA-Z0-9_\\-]",
+    ) {
+        let env = Env::default();
+        let with_bad = format!("{}{}", valid, bad_char);
+        prop_assume!(with_bad.len() >= 3 && with_bad.len() <= 64);
+        // Only test if the bad char is actually non-ASCII or a known disallowed ASCII char
+        let has_disallowed = with_bad.bytes().any(|b| {
+            !b.is_ascii_alphanumeric() && b != b'-' && b != b'_'
+        });
+        if has_disallowed {
+            let id = soroban_sdk::String::from_str(&env, &with_bad);
+            assert!(!validate_id(&id), "expected invalid (bad char): {}", with_bad);
+        }
     }
 }

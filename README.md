@@ -135,6 +135,8 @@ Make stablecoin payments simple, practical, and accessible so merchants can sell
 Contributions are welcome!  
 Open an issue or submit a PR to help build Fluxapay.
 
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full guide: local setup, build and test commands, branch naming, commit format, and PR requirements.
+
 **Before making breaking changes**, please review our [Breaking Change Policy](docs/BREAKING_CHANGES.md) to understand deprecation timelines, versioning strategy, and communication requirements.
 
 ### Local Development Setup
