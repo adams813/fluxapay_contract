@@ -187,6 +187,26 @@ Use the `skip-changelog` label only for CI/CD, docs, or internal refactors with 
 
 ---
 
+## 7.1. Dependabot PRs
+
+This repository uses [Dependabot](https://docs.github.com/en/code-security/dependabot) to automatically create PRs for dependency updates:
+
+- **Cargo dependencies** (Rust crates)
+- **GitHub Actions** (CI workflow actions)
+- **npm dependencies** (SDK packages)
+
+### Handling Dependabot PRs
+
+1. **Review the changes**: Dependabot PRs will have labels indicating the package ecosystem (`rust`, `github-actions`, `npm`)
+2. **Verify CI passes**: All dependency update PRs must pass the full CI pipeline
+3. **Check for breaking changes**: Review the changelog links in the PR description
+4. **Merge when ready**: Once CI passes and the update looks safe, merge the PR
+5. **For major version bumps**: Additional manual testing may be required before merging
+
+> **Note**: Dependabot runs weekly. If you need an urgent security update, you can manually trigger it via the [Dependabot dashboard](https://github.com/Yunusabdul38/fluxapay_contract/security/dependabot).
+
+---
+
 ## 8. Issue Workflow
 
 ### Labels

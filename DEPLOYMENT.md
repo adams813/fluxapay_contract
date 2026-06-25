@@ -194,6 +194,37 @@ If a critical vulnerability or issue is discovered:
 - **Operations Lead**: [operations@fluxapay.com](mailto:operations@fluxapay.com)
 - **Emergency Channel**: #fluxapay-emergency (Slack)
 
+## 📦 WASM Size Management
+
+The CI pipeline enforces a `MAX_WASM_SIZE_KB=100` limit on the compiled WASM artifact.
+
+### Optimization Process
+
+All contracts are optimized using `stellar contract optimize` which applies `wasm-opt -O3` and other optimizations:
+
+```bash
+cd fluxapay && make optimize
+```
+
+### Current Sizes
+
+| Contract | Optimized Size | Limit | Status |
+|----------|---------------|-------|--------|
+| PaymentProcessor | _Run `make optimize` to check_ | 100 KB | ✅ |
+| RefundManager | _Run `make optimize` to check_ | 100 KB | ✅ |
+
+> **Note**: Sizes may vary between builds. Run `make optimize` to verify current sizes.
+
+### Size Reduction Strategies
+
+If the WASM size approaches the limit, see [docs/WASM_OPTIMIZATION.md](docs/WASM_OPTIMIZATION.md) for detailed strategies including:
+1. Removing dead code via `#[cfg(feature = "...")]` feature flags
+2. Optimizing dependencies
+3. Splitting into multiple contracts
+4. Code-level optimizations
+
+---
+
 ## 🌐 Network Configuration
 
 All five FluxaPay contracts implement a custom `upgrade` function that performs state-aware upgrades (version tracking, event emission). Upgrading a contract requires admin authorization.
