@@ -50,6 +50,7 @@ pub(crate) const ZERO_CONTRACT_STRKEY: &str =
 mod access_control;
 pub mod account_abstraction;
 mod dex_router;
+pub mod events;
 pub mod fx_oracle;
 pub mod merchant_auth;
 use access_control::{

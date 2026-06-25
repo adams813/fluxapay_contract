@@ -3,6 +3,8 @@ use soroban_sdk::{
     Symbol, Vec,
 };
 
+use crate::{PaymentCharge, PaymentStatus, format_id};
+
 /// Multi-currency fiat configuration for payment links (issue #413).
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -65,6 +67,10 @@ pub struct PaymentLink {
 pub enum LinkDataKey {
     Link(String),
     LinkAdmin,
+    /// List of payment IDs generated from a link
+    LinkPayments(String),
+    /// Individual payment charge created from a link
+    LinkPayment(String),
 }
 
 #[contract]
@@ -254,15 +260,76 @@ impl PaymentLinkManager {
         }
 
         // Generate a virtual payment ID for tracking
-        let payment_id = crate::format_id(&env, "lnk_pay_", env.ledger().timestamp());
+        let payment_id = format_id(&env, "lnk_pay_", env.ledger().timestamp());
 
-        // Emit LINK/USED event with the resolved USDC amount
+        // Create and store a PaymentCharge record for this payment
+        let now = env.ledger().timestamp();
+        let payment = PaymentCharge {
+            payment_id: payment_id.clone(),
+            merchant_id: link.merchant_id.clone(),
+            amount: resolved_amount,
+            currency: link.currency.clone(),
+            deposit_address: env.current_contract_address(),
+            status: PaymentStatus::Pending,
+            payer_address: Some(payer.clone()),
+            transaction_hash: None,
+            created_at: now,
+            confirmed_at: None,
+            expires_at: now.saturating_add(crate::DEFAULT_PAYMENT_DURATION_SECS),
+            amount_received: None,
+            memo: None,
+            memo_type: None,
+            token_address: usdc_token,
+            metadata_hash: None,
+            original_token: None,
+            swap_path: None,
+            fx_rate: None,
+            fx_rate_at: None,
+            metadata: link.metadata.clone(),
+        };
+
+        // Store the payment charge
+        env.storage()
+            .persistent()
+            .set(&LinkDataKey::LinkPayment(payment_id.clone()), &payment);
+
+        // Track payment ID in the link's payment list
+        let mut payment_ids: Vec<String> = env
+            .storage()
+            .persistent()
+            .get(&LinkDataKey::LinkPayments(link_id.clone()))
+            .unwrap_or_else(|| vec![&env]);
+        payment_ids.push_back(payment_id.clone());
+        env.storage()
+            .persistent()
+            .set(&LinkDataKey::LinkPayments(link_id.clone()), &payment_ids);
+
+        // Emit LINK/USED event with the resolved USDC amount and metadata
         env.events().publish(
             (Symbol::new(&env, "LINK"), Symbol::new(&env, "USED")),
-            (link_id, payer, resolved_amount, payment_id.clone()),
+            (link_id, payer, resolved_amount, payment_id.clone(), link.metadata.clone()),
         );
 
         Ok(payment_id)
+    }
+
+    /// Get a payment charge created from a payment link.
+    /// Returns the PaymentCharge record for the given payment_id.
+    pub fn get_payment(env: Env, payment_id: String) -> Result<PaymentCharge, crate::Error> {
+        env.storage()
+            .persistent()
+            .get(&LinkDataKey::LinkPayment(payment_id))
+            .ok_or(crate::Error::PaymentNotFound)
+    }
+
+    /// Get all payment IDs generated from a specific payment link.
+    /// Returns a vector of payment IDs in chronological order.
+    pub fn get_link_payments(env: Env, link_id: String) -> Result<Vec<String>, crate::Error> {
+        Ok(env
+            .storage()
+            .persistent()
+            .get(&LinkDataKey::LinkPayments(link_id))
+            .unwrap_or_else(|| vec![&env]))
     }
 
     pub fn deactivate_link(

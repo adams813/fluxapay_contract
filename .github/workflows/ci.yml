@@ -163,9 +163,13 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-build-
 
-      - name: Build contract (optimized)
+      - name: Build contract
         working-directory: fluxapay
         run: stellar contract build
+
+      - name: Optimize WASM contract
+        working-directory: fluxapay
+        run: stellar contract optimize --wasm target/wasm32-unknown-unknown/release/fluxapay.wasm
 
       - name: List build artifacts
         run: ls -lh target/wasm32-unknown-unknown/release/*.wasm
