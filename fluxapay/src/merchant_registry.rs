@@ -1,5 +1,5 @@
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, map, vec, Address, Env, Map, String,
+    contract, contracterror, contractimpl, contracttype, map, vec, Address, BytesN, Env, Map, String,
     Symbol, Vec,
 };
 
@@ -1144,5 +1144,32 @@ impl MerchantRegistry {
         // so the SDK surface is consistent. Actual counts live in DataKey::MerchantDisputeCount.
         let _ = (env, merchant_id);
         0
+    }
+
+    /// Upgrade the contract WASM.
+    ///
+    /// Only the admin can call this. Emits a `CONTRACT/UPGRADED` event on success.
+    pub fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) -> Result<(), MerchantError> {
+        admin.require_auth();
+
+        let stored_admin: Address = env
+            .storage()
+            .persistent()
+            .get(&MerchantDataKey::Admin)
+            .ok_or(MerchantError::Unauthorized)?;
+
+        if admin != stored_admin {
+            return Err(MerchantError::Unauthorized);
+        }
+
+        let old_version = String::from_str(&env, "1.0.0");
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
+
+        env.events().publish(
+            (Symbol::new(&env, "CONTRACT"), Symbol::new(&env, "UPGRADED")),
+            (old_version.clone(), String::from_str(&env, "1.0.1")),
+        );
+
+        Ok(())
     }
 }

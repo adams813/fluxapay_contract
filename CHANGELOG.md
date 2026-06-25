@@ -3,26 +3,14 @@
 ## [Unreleased]
 
 ### Added
-- `allow_token` unauthorized non-admin test for token allowlist enforcement (closes #328)
-- `settle_payment` tests for unauthorized operators, pending/expired rejection, and `PAYMENT/SETTLED` event emission (closes #326)
-- `get_merchant_payments_paginated` optional `status_filter` parameter to paginate merchant payments by `PaymentStatus` (closes #280)
-- `scripts/deploy_testnet.sh`: builds all contract WASMs and deploys them to the configured Stellar network; writes resulting contract IDs to `.env.testnet`; fails fast if `STELLAR_SECRET_KEY` or `STELLAR_NETWORK` are unset (closes #294)
-- `docs/local-invoke.md`: CLI recipe sections for `create_refund`, `process_refund`, `create_dispute`, `set_dispute_deadline`, `resolve_dispute_with_refund`, `verify_payment`, `settle_payment`, `set_paused`, `set_rate`, `create_link`, and `use_link` — each with full command, expected output, and error scenarios (closes #299)
-- `docs/local-invoke.md`: Deployment section documenting how to run `scripts/deploy_testnet.sh` and load `.env.testnet`
-
-- `check_dispute_deadline(dispute_id)`: public callable to trigger escalation when a dispute review deadline has elapsed; emits `DISPUTE/ESCALATED` and is a no-op if not passed/already escalated/resolved (closes #306)
-- `top_up_stream(stream_id, amount)`: allows a sender to top up a single stream via direct token transfer; credits the stream deposit and emits `STREAM/TOPPED_UP` (closes #305)
-- Treasury accounting: refund-time fees now accumulate in `DataKey::TreasuryBalance`; adds `get_treasury_balance()` and `withdraw_treasury(admin, amount, destination)` for admin withdrawals; emits `TREASURY/WITHDRAWN` and introduces `Error::InsufficientTreasuryBalance` (closes #291)
-- `create_payments_batch`: atomic batch payment creation API with a maximum batch size of 50 and per-merchant batch rate-limit enforcement; returns payment IDs in order and emits `PAYMENT/CREATED` for each payment (closes #293)
-
-- AccessControl edge-case tests: `renounce_role` idempotency for non-holders, self-role removal, and unauthorized `transfer_admin` validation (closes #337)
-- FXOracle role management tests: `oracle_grant_role` by admin/non-admin authorization, `oracle_has_role` verification, and `get_fx_admin` initialized/uninitialized states (closes #335)
-- MerchantRegistry pagination tests: `get_all_merchants` offset-based edge cases including beyond-range offsets and zero-limit handling (closes #337)
-- PaymentStreaming batch operation tests: `top_up_multiple_streams` authorization and deposit updates, `cancel_multiple_streams` atomicity with invalid IDs, `batch_withdraw_to` multi-destination routing and zero-accrued stream handling (closes #336)
-- PaymentLinkManager batch verification tests: `verify_batch` coverage for active/missing/deactivated links and empty input handling (closes #334)
+- **Issue #394**: Multi-token support — added `set_usdc_token` function to configure a default settlement token and auto-whitelist it; `settle_payment` now supports per-payment token overrides via `payment.token_address`.
+- **Issue #413**: Multi-currency invoicing for payment links — added `fiat: Option<FiatConfig>` to `create_link` with `FiatConfig { amount, currency, oracle }` and `MaybeFiatConfig` Soroban-compatible wrapper; `use_link` resolves the USDC equivalent via the FX oracle at exchange time.
+- **Issue #395**: Contract upgrade mechanism — added `upgrade` function to `FXOracle`, `MerchantRegistry`, and `PaymentLinkManager` with admin authorization and `CONTRACT/UPGRADED` event emission; enhanced `RefundManager::upgrade_contract` with version tracking and event emission.
+- **Issue #406**: Fixed rate-limit window bypass — changed `enforce_create_payment_rate_limit` and related functions from a sliding-window to a fixed-window strategy anchored to the first payment in the window, preventing burst-burst boundary bypass.
 
 ### Changed
-- `.github/workflows/deploy.yml`: replaced inline build and deploy steps with a call to `scripts/deploy_testnet.sh`; exposes all four contract IDs as step outputs; uploads `.env.testnet` as a workflow artifact
+- **Issue #394**: `create_link` now accepts 10 parameters (fiat params bundled into `FiatConfig`); `PaymentLink` struct stores `fiat: MaybeFiatConfig`; existing `create_link` and `use_link` signatures updated accordingly.
+- **All contracts**: Added `CONTRACT/UPGRADED` event emission pattern for upgradeability.
 
 ---
 ## Unreleased

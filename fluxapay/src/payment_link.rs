@@ -1,7 +1,44 @@
 use soroban_sdk::{
-    contract, contractimpl, contracttype, token, vec, Address, Env, Map, MuxedAddress, String,
+    contract, contractimpl, contracttype, token, vec, Address, BytesN, Env, Map, MuxedAddress, String,
     Symbol, Vec,
 };
+
+/// Multi-currency fiat configuration for payment links (issue #413).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FiatConfig {
+    pub amount: i128,
+    pub currency: Symbol,
+    pub oracle: Address,
+}
+
+/// Nullable wrapper for FiatConfig.
+///
+/// Soroban's `#[contracttype]` macro does not support `Option<T>` when `T`
+/// is itself a `#[contracttype]` struct (because structs implement `TryFrom`
+/// rather than `From` for `ScVal`). Using an enum is the idiomatic pattern.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MaybeFiatConfig {
+    None,
+    Some(FiatConfig),
+}
+
+impl MaybeFiatConfig {
+    pub fn as_option(&self) -> Option<&FiatConfig> {
+        match self {
+            MaybeFiatConfig::Some(ref c) => Some(c),
+            MaybeFiatConfig::None => None,
+        }
+    }
+
+    pub fn into_option(self) -> Option<FiatConfig> {
+        match self {
+            MaybeFiatConfig::Some(c) => Some(c),
+            MaybeFiatConfig::None => None,
+        }
+    }
+}
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -20,11 +57,14 @@ pub struct PaymentLink {
     pub direct_transfer: bool,
     /// Optional metadata attached to this payment link.
     pub metadata: Option<Map<String, String>>,
+    /// Fiat configuration for multi-currency invoicing (issue #413).
+    pub fiat: MaybeFiatConfig,
 }
 
 #[contracttype]
 pub enum LinkDataKey {
     Link(String),
+    LinkAdmin,
 }
 
 #[contract]
@@ -40,6 +80,40 @@ impl PaymentLinkManager {
         1
     }
 
+    /// Initialize the contract with an admin address.
+    pub fn initialize(env: Env, admin: Address) {
+        env.storage()
+            .persistent()
+            .set(&LinkDataKey::LinkAdmin, &admin);
+    }
+
+    /// Upgrade the contract WASM.
+    ///
+    /// Only the admin can call this. Emits a `CONTRACT/UPGRADED` event on success.
+    pub fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) -> Result<(), crate::Error> {
+        admin.require_auth();
+
+        let stored_admin: Address = env
+            .storage()
+            .persistent()
+            .get(&LinkDataKey::LinkAdmin)
+            .ok_or(crate::Error::Unauthorized)?;
+
+        if admin != stored_admin {
+            return Err(crate::Error::Unauthorized);
+        }
+
+        let old_version = String::from_str(&env, "1.0.0");
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
+
+        env.events().publish(
+            (Symbol::new(&env, "CONTRACT"), Symbol::new(&env, "UPGRADED")),
+            (old_version.clone(), String::from_str(&env, "1.0.1")),
+        );
+
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn create_link(
         env: Env,
@@ -52,6 +126,7 @@ impl PaymentLinkManager {
         max_uses: Option<u32>,
         direct_transfer: bool,
         metadata: Option<Map<String, String>>,
+        fiat: MaybeFiatConfig,
     ) -> Result<String, crate::Error> {
         merchant.require_auth();
 
@@ -78,6 +153,7 @@ impl PaymentLinkManager {
             active: true,
             direct_transfer,
             metadata,
+            fiat,
         };
 
         env.storage()
@@ -120,13 +196,48 @@ impl PaymentLinkManager {
             }
         }
 
-        if let Some(fixed_amount) = link.amount {
-            if amount != fixed_amount {
+        // Resolve the effective USDC amount:
+        // - If fiat config is set, compute USDC equivalent via the FX oracle
+        // - Otherwise use the caller-supplied amount (validated against link.amount if fixed)
+        let resolved_amount = if let MaybeFiatConfig::Some(ref fiat_cfg) = link.fiat {
+            let oracle_client = crate::fx_oracle::FXOracleClient::new(&env, &fiat_cfg.oracle);
+            let rate_data = oracle_client
+                .try_get_rate(&fiat_cfg.currency)
+                .map_err(|_| crate::Error::StaleOracleRate)?
+                .map_err(|_| crate::Error::StaleOracleRate)?;
+
+            // Oracle rate represents X units of fiat per 1 USDC at the given decimals.
+            // USDC amount = fiat_amount * 10^decimals / rate
+            let mut divisor = 1i128;
+            for _ in 0..rate_data.decimals {
+                divisor = divisor.saturating_mul(10);
+            }
+            let usdc_equivalent = fiat_cfg.amount.saturating_mul(divisor) / rate_data.rate;
+
+            // If the link also has a fixed USDC amount, validate against it
+            if let Some(fixed_amount) = link.amount {
+                if usdc_equivalent != fixed_amount {
+                    return Err(crate::Error::InvalidAmount);
+                }
+            }
+
+            // Validate that the payer sent the correct USDC amount
+            if amount != usdc_equivalent {
                 return Err(crate::Error::InvalidAmount);
             }
-        } else if amount <= 0 {
-            return Err(crate::Error::InvalidAmount);
-        }
+
+            usdc_equivalent
+        } else {
+            // Standard USDC-denominated link: validate against fixed amount if set
+            if let Some(fixed_amount) = link.amount {
+                if amount != fixed_amount {
+                    return Err(crate::Error::InvalidAmount);
+                }
+            } else if amount <= 0 {
+                return Err(crate::Error::InvalidAmount);
+            }
+            amount
+        };
 
         link.use_count += 1;
         env.storage()
@@ -139,16 +250,16 @@ impl PaymentLinkManager {
             let token_address = usdc_token.ok_or(crate::Error::Unauthorized)?;
             let token_client = token::TokenClient::new(&env, &token_address);
             let merchant_muxed: MuxedAddress = (&link.merchant_id).into();
-            token_client.transfer(&payer, &merchant_muxed, &amount);
+            token_client.transfer(&payer, &merchant_muxed, &resolved_amount);
         }
 
         // Generate a virtual payment ID for tracking
         let payment_id = crate::format_id(&env, "lnk_pay_", env.ledger().timestamp());
 
-        // Emit LINK/USED event
+        // Emit LINK/USED event with the resolved USDC amount
         env.events().publish(
             (Symbol::new(&env, "LINK"), Symbol::new(&env, "USED")),
-            (link_id, payer, amount, payment_id.clone()),
+            (link_id, payer, resolved_amount, payment_id.clone()),
         );
 
         Ok(payment_id)
