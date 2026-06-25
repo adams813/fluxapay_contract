@@ -1737,3 +1737,111 @@ fn test_get_payout_history_returns_all_previous_addresses_in_order() {
         "Second history entry should be addr2"
     );
 }
+
+
+// ── Issue #398: transfer_admin tests ────────────────────────────────────────
+
+fn setup_registry_with_admin(env: &Env) -> (MerchantRegistryClient<'_>, Address) {
+    let contract_id = env.register(MerchantRegistry, ());
+    let client = MerchantRegistryClient::new(env, &contract_id);
+    let admin = Address::generate(env);
+    client.initialize(&admin);
+    (client, admin)
+}
+
+#[test]
+fn test_transfer_admin_success() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, admin) = setup_registry_with_admin(&env);
+    let new_admin = Address::generate(&env);
+
+    client.transfer_admin(&admin, &new_admin);
+
+    // get_admin should now return the new admin.
+    assert_eq!(client.get_admin(), Some(new_admin.clone()));
+
+    // New admin can call admin-only functions (verify_merchant).
+    let merchant = Address::generate(&env);
+    client.register_merchant(
+        &merchant,
+        &String::from_str(&env, "Shop"),
+        &String::from_str(&env, "USDC"),
+        &None,
+        &None,
+        &None,
+    );
+    client.verify_merchant(&new_admin, &merchant);
+    assert_eq!(
+        client.get_merchant(&merchant).kyc_tier,
+        KycTier::Basic,
+    );
+}
+
+#[test]
+#[should_panic(expected = "HostError: Error(Contract, #3)")]
+fn test_transfer_admin_unauthorized_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin) = setup_registry_with_admin(&env);
+    let attacker = Address::generate(&env);
+    let new_admin = Address::generate(&env);
+
+    // Non-admin attempts to transfer — must panic with Unauthorized (code 3).
+    client.transfer_admin(&attacker, &new_admin);
+}
+
+#[test]
+#[should_panic(expected = "HostError: Error(Contract, #3)")]
+fn test_old_admin_cannot_act_after_transfer() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, old_admin) = setup_registry_with_admin(&env);
+    let new_admin = Address::generate(&env);
+
+    client.transfer_admin(&old_admin, &new_admin);
+
+    // Register a merchant so we can attempt verify with the old admin.
+    let merchant = Address::generate(&env);
+    client.register_merchant(
+        &merchant,
+        &String::from_str(&env, "OldShop"),
+        &String::from_str(&env, "USDC"),
+        &None,
+        &None,
+        &None,
+    );
+
+    // Old admin tries to verify — must fail with Unauthorized.
+    client.verify_merchant(&old_admin, &merchant);
+}
+
+#[test]
+fn test_transfer_admin_emits_event() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, admin) = setup_registry_with_admin(&env);
+    let new_admin = Address::generate(&env);
+
+    client.transfer_admin(&admin, &new_admin);
+
+    let events = env.events().all();
+    let found = events.iter().any(|(_, topics, _)| {
+        if let (Ok(ns), Ok(ev)) = (
+            topics.get::<Symbol>(0).unwrap().try_into_val(&env),
+            topics.get::<Symbol>(1).unwrap().try_into_val(&env),
+        ) {
+            let ns: Symbol = ns;
+            let ev: Symbol = ev;
+            ns == Symbol::new(&env, "MERCHANT_REGISTRY")
+                && ev == Symbol::new(&env, "ADMIN_TRANSFERRED")
+        } else {
+            false
+        }
+    });
+    assert!(found, "MERCHANT_REGISTRY/ADMIN_TRANSFERRED event not emitted");
+}

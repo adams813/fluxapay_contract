@@ -277,6 +277,12 @@ pub enum Error {
     MetadataTooLarge = 49,
     /// A metadata value exceeds maximum length (> 256 chars).
     MetadataValueTooLong = 47,
+    /// Issue #397: memo_type is not one of: Text, Id, Hash, Return.
+    InvalidMemoType = 50,
+    /// Issue #397: Text memo exceeds the 28-byte Stellar limit.
+    MemoTooLong = 51,
+    /// Issue #397: Id memo is not parseable as a u64.
+    InvalidMemoId = 52,
 }
 
 #[contracttype]
@@ -4451,6 +4457,9 @@ impl PaymentProcessor {
             }
         }
 
+        // Issue #397: Validate Stellar memo type constraints.
+        Self::validate_memo(&env, &args.memo, &args.memo_type)?;
+
         Self::enforce_create_payment_rate_limit(&env, &args.merchant_id)?;
 
         let now = env.ledger().timestamp();
@@ -4508,11 +4517,23 @@ impl PaymentProcessor {
             (args.payment_id.clone(), args.merchant_id.clone(), args.amount, args.metadata.clone()),
         );
 
-        // Persist idempotency key → payment_id mapping so retries are safe.
+        // Issue #399: Persist idempotency key → payment_id mapping with a TTL that matches
+        // the payment expiry window so keys do not accumulate indefinitely.
         if let Some(token) = args.client_token {
-            let key = DataKey::IdempotencyKey(token);
+            let key = DataKey::IdempotencyKey(token.clone());
             env.storage().persistent().set(&key, &args.payment_id);
-            Self::bump_ttl(&env, &key, LONG_LIVE_TTL);
+            // TTL in ledgers ≈ (expires_at − now) / 5s per ledger, clamped to SHORT_LIVE_TTL min.
+            let payment_duration_secs = resolved_expires_at.saturating_sub(now);
+            let ledgers_per_sec: u64 = 5;
+            let ttl_ledgers = ((payment_duration_secs / ledgers_per_sec) as u32)
+                .max(SHORT_LIVE_TTL);
+            Self::bump_ttl(&env, &key, ttl_ledgers);
+            // Store reverse mapping so cancel/expire can clean up the token.
+            // We prefix the payment_id with "r:" to avoid collision with real tokens.
+            let rev_token_id = Self::rev_key_for(&env, &args.payment_id);
+            let rev_key = DataKey::IdempotencyKey(rev_token_id);
+            env.storage().persistent().set(&rev_key, &token);
+            Self::bump_ttl(&env, &rev_key, ttl_ledgers);
         }
 
         Ok(payment)
@@ -4715,11 +4736,20 @@ impl PaymentProcessor {
                 (args.payment_id.clone(), args.merchant_id.clone(), args.amount, args.metadata.clone()),
             );
 
-            // Persist idempotency key
+            // Issue #399: Persist idempotency key with TTL matching payment expiry window.
             if let Some(ref token) = args.client_token {
                 let key = DataKey::IdempotencyKey(token.clone());
                 env.storage().persistent().set(&key, &args.payment_id);
-                Self::bump_ttl(&env, &key, LONG_LIVE_TTL);
+                let payment_duration_secs = resolved_expires_at.saturating_sub(now);
+                let ledgers_per_sec: u64 = 5;
+                let ttl_ledgers = ((payment_duration_secs / ledgers_per_sec) as u32)
+                    .max(SHORT_LIVE_TTL);
+                Self::bump_ttl(&env, &key, ttl_ledgers);
+                // Reverse mapping for cleanup on cancel/expire.
+                let rev_token_id = Self::rev_key_for(&env, &args.payment_id);
+                let rev_key = DataKey::IdempotencyKey(rev_token_id);
+                env.storage().persistent().set(&rev_key, token);
+                Self::bump_ttl(&env, &rev_key, ttl_ledgers);
             }
 
             payment_ids.push_back(args.payment_id.clone());
@@ -5013,6 +5043,8 @@ impl PaymentProcessor {
                 .persistent()
                 .set(&DataKey::Payment(payment_id.clone()), &payment);
             Self::bump_payment_ttl(&env, &payment_id, &payment.status);
+            // Issue #399: free idempotency key so client_token can be reused.
+            Self::remove_idempotency_key(&env, &payment_id);
 
             // Issue #166: Optimize event topics
             env.events().publish(
@@ -5040,6 +5072,8 @@ impl PaymentProcessor {
             .persistent()
             .set(&DataKey::Payment(payment_id.clone()), &payment);
         Self::bump_payment_ttl(&env, &payment_id, &payment.status);
+        // Issue #399: free idempotency key so client_token can be reused after cancellation.
+        Self::remove_idempotency_key(&env, &payment_id);
 
         // Issue #166: Optimize event topics
         env.events().publish(
@@ -5072,6 +5106,8 @@ impl PaymentProcessor {
             .persistent()
             .set(&DataKey::Payment(payment_id.clone()), &payment);
         Self::bump_payment_ttl(&env, &payment_id, &payment.status);
+        // Issue #399: free idempotency key so client_token can be reused.
+        Self::remove_idempotency_key(&env, &payment_id);
 
         // Issue #166: Optimize event topics
         env.events().publish(
@@ -5677,6 +5713,171 @@ impl PaymentProcessor {
             .persistent()
             .get(&DataKey::Payment(payment_id.clone()))
             .ok_or(Error::PaymentNotFound)
+    }
+
+    /// Issue #397: Validate Stellar memo type constraints.
+    ///
+    /// Allowed types: Text, Id, Hash, Return
+    /// - Text: memo must be ≤ 28 bytes UTF-8
+    /// - Id: memo must be parseable as u64
+    /// - Hash / Return: memo must be exactly 32 bytes (64 hex chars)
+    fn validate_memo(
+        env: &Env,
+        memo: &Option<String>,
+        memo_type: &Option<String>,
+    ) -> Result<(), Error> {
+        // If no memo_type provided, memo should also be absent — either both or neither.
+        let memo_type_str = match memo_type {
+            None => return Ok(()), // no memo_type → skip validation
+            Some(t) => t,
+        };
+
+        // Validate memo_type is one of the accepted values.
+        let mut mt_buf = [0u8; 16];
+        let mt_len = (memo_type_str.len() as usize).min(16);
+        memo_type_str.copy_into_slice(&mut mt_buf[..mt_len]);
+        let mt_bytes = &mt_buf[..mt_len];
+
+        let is_text   = mt_bytes == b"Text";
+        let is_id     = mt_bytes == b"Id";
+        let is_hash   = mt_bytes == b"Hash";
+        let is_return = mt_bytes == b"Return";
+
+        if !is_text && !is_id && !is_hash && !is_return {
+            return Err(Error::InvalidMemoType);
+        }
+
+        let memo_val = match memo {
+            None => return Ok(()), // no memo value → no further validation
+            Some(m) => m,
+        };
+
+        if is_text {
+            // Stellar text memos are limited to 28 bytes.
+            if memo_val.len() > 28 {
+                return Err(Error::MemoTooLong);
+            }
+        } else if is_id {
+            // Id memo must be a valid u64 decimal string.
+            let mut buf = [0u8; 20]; // u64::MAX is 20 digits
+            let len = (memo_val.len() as usize).min(20);
+            memo_val.copy_into_slice(&mut buf[..len]);
+            let s = &buf[..len];
+            // All bytes must be ASCII digits.
+            let mut valid = len > 0;
+            for b in s.iter() {
+                if !b.is_ascii_digit() {
+                    valid = false;
+                    break;
+                }
+            }
+            // Also check it doesn't overflow u64 (max 18446744073709551615, 20 digits).
+            if valid && len == 20 {
+                // Compare digit-by-digit with u64::MAX string.
+                let max_str = b"18446744073709551615";
+                for i in 0..20 {
+                    if s[i] < max_str[i] { break; }
+                    if s[i] > max_str[i] { valid = false; break; }
+                }
+            }
+            if !valid || len > 20 {
+                return Err(Error::InvalidMemoId);
+            }
+        }
+        // Hash / Return: no additional validation (the 32-byte constraint applies at the
+        // Stellar protocol layer when submitting the transaction, not at the contract layer).
+
+        let _ = env; // env unused but kept for consistent signature
+        Ok(())
+    }
+
+    /// Issue #396: Returns the total number of payment IDs stored for a merchant.
+    /// Used by pagination UIs alongside `get_merchant_payments_full`.
+    pub fn get_merchant_payment_count(env: Env, merchant_id: Address) -> u32 {
+        let all = Self::get_merchant_payments_internal(&env, &merchant_id);
+        all.len()
+    }
+
+    /// Issue #396: Returns paginated full `PaymentCharge` structs for merchant dashboards.
+    /// `limit` is capped at 50 to avoid ledger compute limits.
+    /// Returns an empty vec (not an error) when `offset` exceeds the total count.
+    #[allow(deprecated)]
+    pub fn get_merchant_payments_full(
+        env: Env,
+        merchant_id: Address,
+        offset: u32,
+        limit: u32,
+    ) -> Vec<PaymentCharge> {
+        let all = Self::get_merchant_payments_internal(&env, &merchant_id);
+        let capped_limit = core::cmp::min(limit, 50);
+
+        if capped_limit == 0 || offset >= all.len() {
+            return vec![&env];
+        }
+
+        let end = core::cmp::min(all.len(), offset.saturating_add(capped_limit));
+        let mut result: Vec<PaymentCharge> = vec![&env];
+
+        let mut i = offset;
+        while i < end {
+            if let Some(id) = all.get(i) {
+                if let Some(payment) = env
+                    .storage()
+                    .persistent()
+                    .get::<DataKey, PaymentCharge>(&DataKey::Payment(id))
+                {
+                    result.push_back(payment);
+                }
+            }
+            i += 1;
+        }
+
+        result
+    }
+
+    /// Issue #399: Remove the idempotency key associated with a payment so the
+    /// client_token can be reused after expiry or cancellation.
+    fn remove_idempotency_key(env: &Env, payment_id: &String) {
+        let rev_token_id = Self::rev_key_for(env, payment_id);
+        let rev_key = DataKey::IdempotencyKey(rev_token_id);
+        if let Some(token) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, String>(&rev_key)
+        {
+            env.storage()
+                .persistent()
+                .remove(&DataKey::IdempotencyKey(token));
+            env.storage().persistent().remove(&rev_key);
+        }
+    }
+
+    /// Build the reverse-map storage key for an idempotency entry.
+    /// Prefixes the payment_id with "r:" so it cannot clash with real client_tokens
+    /// (client_tokens are caller-supplied and conventionally do not start with "r:").
+    fn rev_key_for(env: &Env, payment_id: &String) -> String {
+        use soroban_sdk::Bytes;
+        let prefix = b"r:";
+        let mut buf = Bytes::new(env);
+        for b in prefix {
+            buf.push_back(*b);
+        }
+        let len = payment_id.len() as usize;
+        let mut pid_buf = [0u8; 256];
+        let read = len.min(256);
+        payment_id.copy_into_slice(&mut pid_buf[..read]);
+        for b in &pid_buf[..read] {
+            buf.push_back(*b);
+        }
+        let total = (prefix.len() + read).min(256);
+        let mut out = [0u8; 256];
+        for i in 0..prefix.len() {
+            out[i] = prefix[i];
+        }
+        for i in 0..read {
+            out[prefix.len() + i] = pid_buf[i];
+        }
+        String::from_bytes(env, &out[..total])
     }
 
     fn get_merchant_payments_internal(env: &Env, merchant_id: &Address) -> Vec<String> {

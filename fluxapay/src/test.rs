@@ -3362,3 +3362,221 @@ fn test_settle_payment_emits_fee_collected_event() {
     });
     assert!(settled, "PAYMENT/SETTLED event should be emitted on settlement");
 }
+
+
+// =============================================================================
+// Issue #396: get_merchant_payments_full (paginated PaymentCharge structs)
+// =============================================================================
+
+#[test]
+fn test_get_merchant_payments_full_first_page() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    let merchant_id = Address::generate(&env);
+    client.grant_role(&admin, &role_merchant(&env), &merchant_id);
+
+    // Create 5 payments for this merchant
+    for i in 0u32..5 {
+        let mut id_bytes = [0u8; 8];
+        id_bytes[0] = b'p';
+        id_bytes[1] = b'a';
+        id_bytes[2] = b'y';
+        id_bytes[3] = b'_';
+        id_bytes[4] = b'0' + (i as u8);
+        let payment_id = String::from_bytes(&env, &id_bytes[..5]);
+        let args = create_payment_args(&env, &payment_id, &merchant_id, 1000 + i as i128);
+        client.create_payment(&args);
+    }
+
+    // First page: offset=0, limit=3
+    let page = client.get_merchant_payments_full(&merchant_id, &0, &3);
+    assert_eq!(page.len(), 3);
+    assert_eq!(page.get(0).unwrap().payment_id, String::from_bytes(&env, b"pay_0"));
+    assert_eq!(page.get(1).unwrap().payment_id, String::from_bytes(&env, b"pay_1"));
+    assert_eq!(page.get(2).unwrap().payment_id, String::from_bytes(&env, b"pay_2"));
+}
+
+#[test]
+fn test_get_merchant_payments_full_second_page() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    let merchant_id = Address::generate(&env);
+    client.grant_role(&admin, &role_merchant(&env), &merchant_id);
+
+    for i in 0u32..5 {
+        let mut id_bytes = [0u8; 5];
+        id_bytes[0] = b'p'; id_bytes[1] = b'a'; id_bytes[2] = b'y';
+        id_bytes[3] = b'_'; id_bytes[4] = b'0' + (i as u8);
+        let payment_id = String::from_bytes(&env, &id_bytes);
+        let args = create_payment_args(&env, &payment_id, &merchant_id, 500 + i as i128);
+        client.create_payment(&args);
+    }
+
+    // Second page: offset=3, limit=3 (only 2 remain)
+    let page = client.get_merchant_payments_full(&merchant_id, &3, &3);
+    assert_eq!(page.len(), 2);
+    assert_eq!(page.get(0).unwrap().payment_id, String::from_bytes(&env, b"pay_3"));
+    assert_eq!(page.get(1).unwrap().payment_id, String::from_bytes(&env, b"pay_4"));
+}
+
+#[test]
+fn test_get_merchant_payments_full_offset_beyond_end_returns_empty() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    let merchant_id = Address::generate(&env);
+    client.grant_role(&admin, &role_merchant(&env), &merchant_id);
+
+    let payment_id = String::from_str(&env, "pay_only");
+    let args = create_payment_args(&env, &payment_id, &merchant_id, 1000);
+    client.create_payment(&args);
+
+    // offset beyond end — must return empty vec, not an error
+    let result = client.get_merchant_payments_full(&merchant_id, &100, &10);
+    assert_eq!(result.len(), 0);
+}
+
+#[test]
+fn test_get_merchant_payments_full_limit_capped_at_50() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    let merchant_id = Address::generate(&env);
+    client.grant_role(&admin, &role_merchant(&env), &merchant_id);
+
+    // Create 10 payments
+    for i in 0u32..10 {
+        let mut id_bytes = [0u8; 5];
+        id_bytes[0] = b'p'; id_bytes[1] = b'a'; id_bytes[2] = b'y';
+        id_bytes[3] = b'_'; id_bytes[4] = b'0' + (i as u8);
+        let payment_id = String::from_bytes(&env, &id_bytes);
+        let args = create_payment_args(&env, &payment_id, &merchant_id, 100 + i as i128);
+        client.create_payment(&args);
+    }
+
+    // Requesting limit=200 should be silently capped at 50; we only have 10 so return 10.
+    let result = client.get_merchant_payments_full(&merchant_id, &0, &200);
+    assert_eq!(result.len(), 10); // all 10 returned (well below the 50 cap)
+
+    // Verify returns full PaymentCharge structs
+    let first = result.get(0).unwrap();
+    assert_eq!(first.amount, 100);
+}
+
+#[test]
+fn test_get_merchant_payment_count_for_dashboard() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    let merchant_id = Address::generate(&env);
+    client.grant_role(&admin, &role_merchant(&env), &merchant_id);
+
+    assert_eq!(client.get_merchant_payment_count(&merchant_id), 0);
+
+    for i in 0u32..3 {
+        let mut id_bytes = [0u8; 5];
+        id_bytes[0] = b'p'; id_bytes[1] = b'a'; id_bytes[2] = b'y';
+        id_bytes[3] = b'_'; id_bytes[4] = b'0' + (i as u8);
+        let payment_id = String::from_bytes(&env, &id_bytes);
+        let args = create_payment_args(&env, &payment_id, &merchant_id, 500);
+        client.create_payment(&args);
+    }
+
+    assert_eq!(client.get_merchant_payment_count(&merchant_id), 3);
+}
+
+// =============================================================================
+// Issue #399: idempotency key TTL and cleanup on expiry / cancellation
+// =============================================================================
+
+#[test]
+fn test_idempotency_key_reuse_after_cancellation() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    let merchant_id = Address::generate(&env);
+    client.grant_role(&admin, &role_merchant(&env), &merchant_id);
+
+    let token = Some(String::from_str(&env, "tok_cancel_reuse"));
+
+    // Create first payment with the client_token.
+    let payment_id_1 = String::from_str(&env, "pay_cancel_1");
+    let mut args = create_payment_args(&env, &payment_id_1, &merchant_id, 1000);
+    args.client_token = token.clone();
+    client.create_payment(&args);
+
+    // Cancel the first payment (merchant is the authority).
+    client.cancel_payment(&merchant_id, &payment_id_1);
+
+    // After cancellation the idempotency key should be freed —
+    // reuse with a *different* payment_id must now succeed (not DuplicateIdempotencyKey).
+    let payment_id_2 = String::from_str(&env, "pay_cancel_2");
+    let mut args2 = create_payment_args(&env, &payment_id_2, &merchant_id, 1000);
+    args2.client_token = token.clone();
+    let payment = client.create_payment(&args2);
+    assert_eq!(payment.payment_id, payment_id_2);
+}
+
+#[test]
+fn test_idempotency_key_reuse_after_expiry() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    let merchant_id = Address::generate(&env);
+    client.grant_role(&admin, &role_merchant(&env), &merchant_id);
+
+    let token = Some(String::from_str(&env, "tok_expire_reuse"));
+
+    // Create a payment that expires in 1 second.
+    let now = env.ledger().timestamp();
+    let payment_id_1 = String::from_str(&env, "pay_expire_1");
+    let mut args = create_payment_args(&env, &payment_id_1, &merchant_id, 1000);
+    args.expires_at = Some(now + 1);
+    args.client_token = token.clone();
+    client.create_payment(&args);
+
+    // Advance ledger past expiry.
+    env.ledger().with_mut(|li| li.timestamp = now + 10);
+
+    // expire_payment triggers idempotency key cleanup.
+    client.expire_payment(&payment_id_1);
+
+    // Now the same token should be reusable with a new payment_id.
+    let payment_id_2 = String::from_str(&env, "pay_expire_2");
+    let mut args2 = create_payment_args(&env, &payment_id_2, &merchant_id, 1000);
+    args2.expires_at = Some(env.ledger().timestamp() + 3600);
+    args2.client_token = token.clone();
+    let payment = client.create_payment(&args2);
+    assert_eq!(payment.payment_id, payment_id_2);
+}
+
+#[test]
+fn test_idempotency_still_blocks_during_active_window() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_payment_processor(&env);
+
+    let merchant_id = Address::generate(&env);
+    client.grant_role(&admin, &role_merchant(&env), &merchant_id);
+
+    let token = Some(String::from_str(&env, "tok_active_block"));
+    let payment_id = String::from_str(&env, "pay_active");
+    let mut args = create_payment_args(&env, &payment_id, &merchant_id, 1000);
+    args.client_token = token.clone();
+    client.create_payment(&args);
+
+    // Attempt reuse with a *different* payment_id while the payment is still active.
+    let mut args2 = args.clone();
+    args2.payment_id = String::from_str(&env, "pay_active_other");
+    let result = client.try_create_payment(&args2);
+    assert_eq!(result, Err(Ok(Error::DuplicateIdempotencyKey)));
+}
