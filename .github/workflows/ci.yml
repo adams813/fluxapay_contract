@@ -409,6 +409,10 @@ jobs:
         working-directory: sdk
         run: npm run build
 
+      - name: Test SDK
+        working-directory: sdk
+        run: npm test
+
   # Final job: Report overall status
   ci-success:
     name: CI Success

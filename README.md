@@ -2,6 +2,18 @@ Fluxapay is a payment gateway on the Stellar blockchain that enables merchants t
 
 FluxaPay bridges the gap between crypto payments and real-world commerce—making stablecoin payments as easy to integrate as Stripe.
 
+## TypeScript SDK
+
+[![npm version](https://img.shields.io/npm/v/@fluxapay/sdk.svg)](https://www.npmjs.com/package/@fluxapay/sdk)
+
+Install the official SDK from npm:
+
+```bash
+npm install @fluxapay/sdk
+```
+
+See [sdk/README.md](sdk/README.md) for usage examples and [sdk/CHANGELOG.md](sdk/CHANGELOG.md) for release notes.
+
 ## CI/CD
 
 [![CI](https://github.com/MetroLogic/fluxapay_contract/actions/workflows/ci.yml/badge.svg)](https://github.com/MetroLogic/fluxapay_contract/actions/workflows/ci.yml)

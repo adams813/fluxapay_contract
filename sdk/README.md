@@ -8,6 +8,10 @@ Official TypeScript SDK for interacting with FluxaPay's Soroban smart contracts 
 npm install @fluxapay/sdk
 ```
 
+## Release Notes
+
+See [CHANGELOG.md](./CHANGELOG.md) for version history.
+
 ## Quick Start
 
 ```typescript
@@ -199,3 +203,14 @@ await oracleClient.setStalenessThreshold(
 ## License
 
 MIT
+
+## Publishing
+
+Releases are published to npm when a version tag is pushed:
+
+```bash
+git tag sdk/v0.1.0
+git push origin sdk/v0.1.0
+```
+
+The [SDK Release](https://github.com/MetroLogic/fluxapay_contract/actions/workflows/sdk-release.yml) workflow builds, tests, and publishes `@fluxapay/sdk`. Requires `NPM_TOKEN` in GitHub repository secrets (npm automation token with publish access to the `@fluxapay` scope).
