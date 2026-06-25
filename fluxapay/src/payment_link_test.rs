@@ -1,7 +1,10 @@
-﻿use crate::{PaymentLinkManager, PaymentLinkManagerClient};
+﻿use crate::{
+    FiatConfig, MaybeFiatConfig, PaymentLinkManager, PaymentLinkManagerClient, FXOracle,
+    FXOracleClient,
+};
 use soroban_sdk::{
     testutils::{Address as _, Ledger as _},
-    token, vec, Address, Env, Map, String, Symbol,
+    token, vec, Address, BytesN, Env, Map, String, Symbol,
 };
 
 fn setup_payment_link(env: &Env) -> (Address, PaymentLinkManagerClient<'_>) {
@@ -32,6 +35,7 @@ fn test_create_link() {
         &None,
         &false,
         &None,
+        &MaybeFiatConfig::None,
     );
 
     assert_eq!(id, link_id);
@@ -61,6 +65,7 @@ fn test_use_link_fixed_amount() {
         &None,
         &false,
         &None,
+        &MaybeFiatConfig::None,
     );
 
     let payment_id = client.use_link(&payer, &link_id, &amount, &None);
@@ -89,6 +94,7 @@ fn test_use_link_wrong_amount() {
         &None,
         &false,
         &None,
+        &MaybeFiatConfig::None,
     );
 
     client.use_link(&payer, &link_id, &500i128, &None);
@@ -112,6 +118,7 @@ fn test_use_link_open_amount() {
         &None,
         &false,
         &None,
+        &MaybeFiatConfig::None,
     );
 
     client.use_link(&payer, &link_id, &1500i128, &None);
@@ -136,6 +143,7 @@ fn test_deactivate_link() {
         &None,
         &false,
         &None,
+        &MaybeFiatConfig::None,
     );
 
     client.deactivate_link(&merchant, &link_id);
@@ -163,6 +171,7 @@ fn test_link_expired() {
         &None,
         &false,
         &None,
+        &MaybeFiatConfig::None,
     );
 
     env.ledger().set_timestamp(expiry + 1);
@@ -188,6 +197,7 @@ fn test_verify_batch_returns_status_for_active_links() {
         &None,
         &false,
         &None,
+        &MaybeFiatConfig::None,
     );
     client.create_link(
         &merchant,
@@ -199,6 +209,7 @@ fn test_verify_batch_returns_status_for_active_links() {
         &None,
         &false,
         &None,
+        &MaybeFiatConfig::None,
     );
 
     let results = client.verify_batch(&vec![&env, link_id1.clone(), link_id2.clone()]);
@@ -226,6 +237,7 @@ fn test_verify_batch_handles_missing_links() {
         &None,
         &false,
         &None,
+        &MaybeFiatConfig::None,
     );
 
     let results = client.verify_batch(&vec![&env, existing_link.clone(), missing_link.clone()]);
@@ -251,6 +263,7 @@ fn test_verify_batch_returns_inactive_for_deactivated_link() {
         &Some(10),
         &false,
         &None,
+        &MaybeFiatConfig::None,
     );
 
     client.deactivate_link(&merchant, &link_id);
@@ -289,6 +302,7 @@ fn test_max_uses() {
         &Some(1),
         &false,
         &None,
+        &MaybeFiatConfig::None,
     );
 
     client.use_link(&payer, &link_id, &100i128, &None);
@@ -326,7 +340,8 @@ fn test_direct_transfer_link_transfers_to_merchant() {
         &None,
         &None,
         &true,
-        &None, // direct_transfer = true
+        &None,
+        &MaybeFiatConfig::None,
     );
 
     let link = client.get_link(&link_id);
@@ -361,6 +376,7 @@ fn test_direct_transfer_without_token_address_fails() {
         &None,
         &true,
         &None,
+        &MaybeFiatConfig::None,
     );
 
     // Should fail because usdc_token is None but direct_transfer is true
@@ -396,6 +412,7 @@ fn test_metadata_too_large_21_keys() {
         &None,
         &false,
         &Some(metadata),
+        &MaybeFiatConfig::None,
     );
 }
 
@@ -421,6 +438,7 @@ fn test_metadata_value_too_long_257_chars() {
         &None,
         &false,
         &Some(metadata),
+        &MaybeFiatConfig::None,
     );
 }
 
@@ -451,6 +469,7 @@ fn test_metadata_20_keys_256_char_values_succeeds() {
         &None,
         &false,
         &Some(metadata),
+        &MaybeFiatConfig::None,
     );
 
     assert_eq!(id, link_id);
@@ -475,9 +494,146 @@ fn test_metadata_none_succeeds() {
         &None,
         &false,
         &None,
+        &MaybeFiatConfig::None,
     );
 
     assert_eq!(id, link_id);
     let link = client.get_link(&link_id);
     assert!(link.metadata.is_none());
+}
+
+// ── Issue #413: Multi-Currency Invoicing (Fiat) ────────────────────────────
+
+#[test]
+fn test_create_fiat_link_and_use_with_rate() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    // Deploy FX oracle
+    let oracle_id = env.register(FXOracle, ());
+    let oracle_client = FXOracleClient::new(&env, &oracle_id);
+    let oracle_admin = Address::generate(&env);
+    oracle_client.oracle_initialize(&oracle_admin, &86400);
+    let oracle = Address::generate(&env);
+    oracle_client.oracle_grant_role(&oracle_admin, &Symbol::new(&env, "ORACLE"), &oracle);
+
+    // Set rate: 1.0 USD per USDC (rate = 1_0000000, 7 decimals)
+    oracle_client.set_rate(&oracle, &Symbol::new(&env, "USD"), &1_0000000i128, &7);
+
+    // Deploy payment link manager
+    let (merchant, client) = setup_payment_link(&env);
+
+    let link_id = String::from_str(&env, "fiat_link");
+    let fiat = FiatConfig {
+        amount: 100i128,
+        currency: Symbol::new(&env, "USD"),
+        oracle: oracle_id.clone(),
+    };
+
+    let id = client.create_link(
+        &merchant,
+        &link_id,
+        &None, // amount: open (allow any USDC)
+        &Symbol::new(&env, "USDC"),
+        &String::from_str(&env, "Fiat Invoice"),
+        &None,
+        &None,
+        &false,
+        &None,
+        &MaybeFiatConfig::Some(fiat),
+    );
+
+    assert_eq!(id, link_id);
+    let link = client.get_link(&link_id);
+    let stored_fiat = link.fiat.into_option().unwrap();
+    assert_eq!(stored_fiat.amount, 100);
+    assert_eq!(stored_fiat.currency, Symbol::new(&env, "USD"));
+    assert_eq!(stored_fiat.oracle, oracle_id);
+}
+
+#[test]
+fn test_use_fiat_link_requires_correct_usdc() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let oracle_id = env.register(FXOracle, ());
+    let oracle_client = FXOracleClient::new(&env, &oracle_id);
+    let oracle_admin = Address::generate(&env);
+    oracle_client.oracle_initialize(&oracle_admin, &86400);
+    let oracle = Address::generate(&env);
+    oracle_client.oracle_grant_role(&oracle_admin, &Symbol::new(&env, "ORACLE"), &oracle);
+
+    // Rate: 1 USD = 2 USDC
+    oracle_client.set_rate(&oracle, &Symbol::new(&env, "USD"), &2_0000000i128, &7);
+
+    let (merchant, client) = setup_payment_link(&env);
+    let payer = Address::generate(&env);
+
+    let link_id = String::from_str(&env, "fiat_use");
+    let fiat = FiatConfig {
+        amount: 50i128, // $50 → should require 25 USDC (50/2)
+        currency: Symbol::new(&env, "USD"),
+        oracle: oracle_id,
+    };
+
+    client.create_link(
+        &merchant,
+        &link_id,
+        &None, // amount: open
+        &Symbol::new(&env, "USDC"),
+        &String::from_str(&env, "Fiat Use"),
+        &None,
+        &None,
+        &false,
+        &None,
+        &MaybeFiatConfig::Some(fiat),
+    );
+
+    // Should succeed with correct USDC equivalent (50 * 10^7 / 2_0000000 = 25)
+    let payment_id = client.use_link(&payer, &link_id, &25i128, &None);
+    assert!(!payment_id.is_empty());
+    let link = client.get_link(&link_id);
+    assert_eq!(link.use_count, 1);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #406)")]
+fn test_use_fiat_link_rejects_wrong_usdc() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let oracle_id = env.register(FXOracle, ());
+    let oracle_client = FXOracleClient::new(&env, &oracle_id);
+    let oracle_admin = Address::generate(&env);
+    oracle_client.oracle_initialize(&oracle_admin, &86400);
+    let oracle = Address::generate(&env);
+    oracle_client.oracle_grant_role(&oracle_admin, &Symbol::new(&env, "ORACLE"), &oracle);
+
+    oracle_client.set_rate(&oracle, &Symbol::new(&env, "USD"), &1_0000000i128, &7);
+
+    let (merchant, client) = setup_payment_link(&env);
+    let payer = Address::generate(&env);
+
+    let link_id = String::from_str(&env, "fiat_wrong");
+    let fiat = FiatConfig {
+        amount: 100i128, // $100 → should require 100 USDC (rate 1.0)
+        currency: Symbol::new(&env, "USD"),
+        oracle: oracle_id,
+    };
+
+    client.create_link(
+        &merchant,
+        &link_id,
+        &None,
+        &Symbol::new(&env, "USDC"),
+        &String::from_str(&env, "Fiat Wrong"),
+        &None,
+        &None,
+        &false,
+        &None,
+        &MaybeFiatConfig::Some(fiat),
+    );
+
+    // 50 USDC is wrong when fiat_amount=100 at rate=1
+    client.use_link(&payer, &link_id, &50i128, &None);
 }

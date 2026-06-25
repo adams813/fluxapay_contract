@@ -3657,6 +3657,11 @@ impl RefundManager {
         env.storage().persistent().extend_ttl(key, threshold, ttl);
     }
 
+    /// Upgrade the contract WASM and increment the contract version.
+    ///
+    /// Only the admin can call this. On success, the `ContractVersion` in persistent
+    /// storage is updated and a `CONTRACT/UPGRADED` event is emitted with the old and
+    /// new version strings.
     pub fn upgrade_contract(env: Env, admin: Address, new_wasm_hash: BytesN<32>) -> Result<(), Error> {
         admin.require_auth();
 
@@ -3664,7 +3669,25 @@ impl RefundManager {
             return Err(Error::Unauthorized);
         }
 
+        let old_version: String = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ContractVersion)
+            .unwrap_or_else(|| String::from_str(&env, INITIAL_CONTRACT_VERSION));
+
+        let new_version_str = bump_version_string(&env, &old_version);
+
         env.deployer().update_current_contract_wasm(new_wasm_hash);
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::ContractVersion, &new_version_str);
+
+        env.events().publish(
+            (Symbol::new(&env, "CONTRACT"), Symbol::new(&env, "UPGRADED")),
+            (old_version, new_version_str),
+        );
+
         Ok(())
     }
 }
@@ -3973,6 +3996,12 @@ impl PaymentProcessor {
         Ok(())
     }
 
+    /// Fixed-window rate limiter per merchant.
+    ///
+    /// `last_payment_at` stores the start of the current fixed window (set when the window
+    /// is first entered). The counter resets only when `now` exceeds `window_start + window_secs`.
+    /// This prevents the sliding-window bypass where bursts at the end of one window and the
+    /// beginning of the next could otherwise double the effective rate.
     fn enforce_create_payment_rate_limit(env: &Env, merchant_id: &Address) -> Result<(), Error> {
         let now = env.ledger().timestamp();
         
@@ -3997,7 +4026,9 @@ impl PaymentProcessor {
                 });
 
         if now.saturating_sub(state.last_payment_at) >= config.window_secs {
+            // Start a new fixed window
             state.count = 0;
+            state.last_payment_at = now;
         }
 
         if state.count >= config.max_per_window {
@@ -4005,7 +4036,6 @@ impl PaymentProcessor {
         }
 
         state.count = state.count.saturating_add(1);
-        state.last_payment_at = now;
 
         env.storage().persistent().set(&key, &state);
         Self::bump_ttl(env, &key, SHORT_LIVE_TTL);
@@ -4037,7 +4067,9 @@ impl PaymentProcessor {
             });
 
         if now.saturating_sub(state.last_payment_at) >= config.window_secs {
+            // Start a new fixed window
             state.count = 0;
+            state.last_payment_at = now;
         }
 
         if state.count >= config.max_per_window {
@@ -4045,7 +4077,6 @@ impl PaymentProcessor {
         }
 
         state.count = state.count.saturating_add(1);
-        state.last_payment_at = now;
 
         env.storage().persistent().set(&key, &state);
         Self::bump_ttl(env, &key, SHORT_LIVE_TTL);
@@ -4085,7 +4116,9 @@ impl PaymentProcessor {
             });
 
         if now.saturating_sub(state.last_payment_at) >= config.window_secs {
+            // Start a new fixed window
             state.count = 0;
+            state.last_payment_at = now;
         }
 
         if state.count >= config.max_per_window {
@@ -4093,7 +4126,6 @@ impl PaymentProcessor {
         }
 
         state.count = state.count.saturating_add(1);
-        state.last_payment_at = now;
 
         env.storage().persistent().set(&key, &state);
         Self::bump_ttl(env, &key, SHORT_LIVE_TTL);
@@ -4182,6 +4214,20 @@ impl PaymentProcessor {
             }
         }
         Ok(())
+    }
+
+    /// Set the USDC token address used as the default settlement token.
+    /// Also adds it to the supported tokens whitelist.
+    pub fn set_usdc_token(env: Env, admin: Address, token_address: Address) -> Result<(), Error> {
+        admin.require_auth();
+        if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
+            return Err(Error::Unauthorized);
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::UsdcToken, &token_address);
+        // Auto-add USDC to the supported tokens whitelist
+        Self::allow_token(env, admin, token_address)
     }
 
     /// Allow or disallow a token address for use in payments (admin only).
@@ -5157,6 +5203,13 @@ impl PaymentProcessor {
             return Err(Error::InvalidSettlement);
         }
 
+        // Resolve the settlement token: use payment.token_address if set, else the configured USDC token
+        let settlement_token: Option<Address> = payment.token_address.clone().or_else(|| {
+            env.storage()
+                .persistent()
+                .get::<DataKey, Address>(&DataKey::UsdcToken)
+        });
+
         // ── Configurable settlement fee (accumulated in TreasuryBalance) ─────────
         // Read the settlement fee rate in basis points. 0 bps → no fee, no event.
         let settlement_fee_bps: i128 = env
@@ -5229,13 +5282,9 @@ impl PaymentProcessor {
                         AccessControl::get_admin(&env).unwrap_or_else(|| env.current_contract_address())
                     };
 
-                    // Transfer to USDC token if configured
-                    if let Some(usdc_token_address) = env
-                        .storage()
-                        .persistent()
-                        .get::<DataKey, Address>(&DataKey::UsdcToken)
-                    {
-                        let token_client = token::TokenClient::new(&env, &usdc_token_address);
+                    // Transfer using the resolved settlement token (if configured)
+                    if let Some(ref settlement_token) = settlement_token {
+                        let token_client = token::TokenClient::new(&env, settlement_token);
                         let from = env.current_contract_address();
 
                         // Transfer net amount to merchant
@@ -5303,14 +5352,10 @@ impl PaymentProcessor {
             return Err(Error::InvalidSettlement);
         }
 
-        // Transfer platform fee to fee_recipient
+        // Transfer platform fee to fee_recipient using the resolved settlement token (if configured)
         if platform_fee > 0 {
-            if let Some(usdc_token_address) = env
-                .storage()
-                .persistent()
-                .get::<DataKey, Address>(&DataKey::UsdcToken)
-            {
-                let token_client = token::TokenClient::new(&env, &usdc_token_address);
+            if let Some(ref settlement_token) = settlement_token {
+                let token_client = token::TokenClient::new(&env, settlement_token);
                 let from = env.current_contract_address();
                 let _ = token_client.try_transfer(&from, &fee_recipient, &platform_fee);
             }
@@ -6281,7 +6326,9 @@ mod oracle_sanitization_test;
 mod payment_link;
 #[cfg(test)]
 mod proptests;
-pub use payment_link::{PaymentLink, PaymentLinkManager, PaymentLinkManagerClient};
+pub use payment_link::{
+    FiatConfig, MaybeFiatConfig, PaymentLink, PaymentLinkManager, PaymentLinkManagerClient,
+};
 #[cfg(test)]
 mod memo_test;
 #[cfg(test)]

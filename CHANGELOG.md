@@ -3,6 +3,10 @@
 ## [Unreleased]
 
 ### Added
+- **Issue #394**: Multi-token support — added `set_usdc_token` function to configure a default settlement token and auto-whitelist it; `settle_payment` now supports per-payment token overrides via `payment.token_address`.
+- **Issue #413**: Multi-currency invoicing for payment links — added `fiat: Option<FiatConfig>` to `create_link` with `FiatConfig { amount, currency, oracle }` and `MaybeFiatConfig` Soroban-compatible wrapper; `use_link` resolves the USDC equivalent via the FX oracle at exchange time.
+- **Issue #395**: Contract upgrade mechanism — added `upgrade` function to `FXOracle`, `MerchantRegistry`, and `PaymentLinkManager` with admin authorization and `CONTRACT/UPGRADED` event emission; enhanced `RefundManager::upgrade_contract` with version tracking and event emission.
+- **Issue #406**: Fixed rate-limit window bypass — changed `enforce_create_payment_rate_limit` and related functions from a sliding-window to a fixed-window strategy anchored to the first payment in the window, preventing burst-burst boundary bypass.
 - **Issue #399** — Idempotency key TTL: `DataKey::IdempotencyKey` entries are now stored with a TTL derived from the payment expiry window (ledgers ≈ `(expires_at − now) / 5`, minimum `SHORT_LIVE_TTL`) instead of the permanent `LONG_LIVE_TTL`. A new reverse-map key `DataKey::PaymentIdempotencyToken(payment_id)` is also stored so `cancel_payment` and `expire_payment` can proactively remove the forward key, freeing the `client_token` for reuse immediately after a payment is cancelled or expired.
 - **Issue #398** — `MerchantRegistry::transfer_admin(current_admin, new_admin)`: allows the current admin to hand off registry ownership atomically. Validates stored admin matches `current_admin`, updates `MerchantDataKey::Admin`, and emits `MERCHANT_REGISTRY/ADMIN_TRANSFERRED`. Added `get_admin()` getter. Old admin loses all privileges immediately after transfer.
 - **Issue #397** — Stellar memo type validation in `create_payment`: `memo_type` must be one of `Text`, `Id`, `Hash`, or `Return`; Text memos are rejected if > 28 bytes; Id memos are rejected if not a valid `u64` decimal string. New error codes: `InvalidMemoType = 50`, `MemoTooLong = 51`, `InvalidMemoId = 52`. Validation is a no-op when `memo_type` is `None`.
@@ -29,7 +33,8 @@
 - PaymentLinkManager batch verification tests: `verify_batch` coverage for active/missing/deactivated links and empty input handling (closes #334)
 
 ### Changed
-- `.github/workflows/deploy.yml`: replaced inline build and deploy steps with a call to `scripts/deploy_testnet.sh`; exposes all four contract IDs as step outputs; uploads `.env.testnet` as a workflow artifact
+- **Issue #394**: `create_link` now accepts 10 parameters (fiat params bundled into `FiatConfig`); `PaymentLink` struct stores `fiat: MaybeFiatConfig`; existing `create_link` and `use_link` signatures updated accordingly.
+- **All contracts**: Added `CONTRACT/UPGRADED` event emission pattern for upgradeability.
 
 ---
 ## Unreleased

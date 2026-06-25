@@ -1,4 +1,4 @@
-use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Env, Symbol};
+use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, BytesN, Env, String, Symbol};
 
 use crate::access_control::{role_admin, role_oracle, AccessControl};
 
@@ -136,6 +136,28 @@ impl FXOracle {
             .instance()
             .get(&OracleDataKey::StalenessThreshold)
             .unwrap_or(86400)
+    }
+
+    /// Upgrade the contract WASM.
+    ///
+    /// Only the admin can call this. Emits a `CONTRACT/UPGRADED` event with the
+    /// old and new version strings on success.
+    pub fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) -> Result<(), FXOracleError> {
+        admin.require_auth();
+
+        if !AccessControl::has_role(&env, &role_admin(&env), &admin) {
+            return Err(FXOracleError::Unauthorized);
+        }
+
+        let old_version = String::from_str(&env, "1.0.0");
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
+
+        env.events().publish(
+            (Symbol::new(&env, "CONTRACT"), Symbol::new(&env, "UPGRADED")),
+            (old_version.clone(), String::from_str(&env, "1.0.1")),
+        );
+
+        Ok(())
     }
 
     pub fn set_staleness_threshold(

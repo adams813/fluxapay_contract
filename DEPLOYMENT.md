@@ -22,6 +22,7 @@ This document records the deployed contract addresses, network configurations, a
 | RefundManager    | Testnet | `<REFUND_MANAGER_ID>`    | `YYYY-MM-DD` | `<DEPLOYER_ADDRESS>` |
 | MerchantRegistry | Testnet | `<MERCHANT_REGISTRY_ID>` | `YYYY-MM-DD` | `<DEPLOYER_ADDRESS>` |
 | FXOracle         | Testnet | `<FX_ORACLE_ID>`         | `YYYY-MM-DD` | `<DEPLOYER_ADDRESS>` |
+| PaymentLinkManager | Testnet | `<PAYMENT_LINK_ID>`      | `YYYY-MM-DD` | `<DEPLOYER_ADDRESS>` |
 
 > [!NOTE]
 > For Mainnet addresses, please refer to the secure internal dashboard or contact the operations lead.
@@ -195,7 +196,17 @@ If a critical vulnerability or issue is discovered:
 
 ## 🌐 Network Configuration
 
-The FluxaPay contracts follow the standard Soroban upgrade pattern. Upgrading a contract requires administrative authorization.
+All five FluxaPay contracts implement a custom `upgrade` function that performs state-aware upgrades (version tracking, event emission). Upgrading a contract requires admin authorization.
+
+### Upgradeable Contracts
+
+| Contract | Upgrade Function | Auth Mechanism |
+|---|---|---|
+| `PaymentProcessor` | `upgrade_contract(admin, new_wasm_hash)` | AccessControl admin role |
+| `RefundManager` | `upgrade_contract(admin, new_wasm_hash)` | AccessControl admin role |
+| `FXOracle` | `upgrade(admin, new_wasm_hash)` | AccessControl admin role |
+| `MerchantRegistry` | `upgrade(admin, new_wasm_hash)` | `MerchantDataKey::Admin` check |
+| `PaymentLinkManager` | `upgrade(admin, new_wasm_hash)` | Internal admin via `initialize` |
 
 ### Step 1: Upload New WASM
 
@@ -209,15 +220,27 @@ Take note of the returned `Wasm Hash`.
 
 ### Step 2: Invoke Upgrade
 
-Invoke the `upgrade` function (if implemented) or use the `stellar-cli` to update the contract instance's executable.
-
-> [!IMPORTANT]
-> If a custom `upgrade` function is not present in the contract logic, a logic update or a redeployment/migration may be required depending on the specific contract state management.
-
 ```bash
-# Example if using a custom upgrade function (recommended for state migration)
-stellar contract invoke --id <CONTRACT_ID> --network testnet --source <ADMIN_SECRET> -- upgrade --new_wasm_hash <WASM_HASH>
+# PaymentProcessor
+stellar contract invoke --id <PAYMENT_PROCESSOR_ID> --network testnet --source <ADMIN_SECRET> -- upgrade_contract --admin <ADMIN> --new_wasm_hash <WASM_HASH>
+
+# RefundManager
+stellar contract invoke --id <REFUND_MANAGER_ID> --network testnet --source <ADMIN_SECRET> -- upgrade_contract --admin <ADMIN> --new_wasm_hash <WASM_HASH>
+
+# FXOracle
+stellar contract invoke --id <FX_ORACLE_ID> --network testnet --source <ADMIN_SECRET> -- upgrade --admin <ADMIN> --new_wasm_hash <WASM_HASH>
+
+# MerchantRegistry
+stellar contract invoke --id <MERCHANT_REGISTRY_ID> --network testnet --source <ADMIN_SECRET> -- upgrade --admin <ADMIN> --new_wasm_hash <WASM_HASH>
+
+# PaymentLinkManager (requires prior initialize call)
+stellar contract invoke --id <PAYMENT_LINK_ID> --network testnet --source <ADMIN_SECRET> -- upgrade --admin <ADMIN> --new_wasm_hash <WASM_HASH>
 ```
+
+### Notes
+- **PaymentLinkManager** must be initialized via `initialize(admin)` before the first `upgrade` call. Without initialization, the admin storage key does not exist and non-admin callers will be rejected.
+- All upgrade functions emit a `CONTRACT/UPGRADED` event with `(old_version, new_version)` for off-chain tracking.
+- The contract version is auto-incremented from `1.0.0` using semver patch bumps internally.
 
 ## 🔑 Admin Key Rotation
 

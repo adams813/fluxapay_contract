@@ -1,5 +1,5 @@
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, map, vec, Address, Env, Map, String,
+    contract, contracterror, contractimpl, contracttype, map, vec, Address, BytesN, Env, Map, String,
     Symbol, Vec,
 };
 
@@ -1146,6 +1146,11 @@ impl MerchantRegistry {
         0
     }
 
+    /// Upgrade the contract WASM.
+    ///
+    /// Only the admin can call this. Emits a `CONTRACT/UPGRADED` event on success.
+    pub fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) -> Result<(), MerchantError> {
+        admin.require_auth();
     /// Issue #398: Transfer MerchantRegistry admin ownership to a new address.
     ///
     /// Only the current admin may call this. Once transferred, the old admin
