@@ -111,6 +111,8 @@ pub enum MerchantDataKey {
     PaymentProcessorAddress,
     /// Ordered list of previous payout addresses for a merchant (audit trail).
     MerchantPayoutHistory(Address),
+    /// KYC tier limits
+    TierLimit(KycTier),
 }
 
 /// Platform fee configuration stored in MerchantRegistry.
@@ -153,7 +155,50 @@ impl MerchantRegistry {
         env.storage()
             .persistent()
             .set(&MerchantDataKey::Admin, &admin);
+
+        // Default limits for Unverified tier (max 100 USDC in stroops, assuming 7 decimals: 100 * 10^7)
+        env.storage().persistent().set(
+            &MerchantDataKey::TierLimit(KycTier::Unverified),
+            &crate::AmountLimits {
+                min: None,
+                max: Some(1_000_000_000),
+            },
+        );
+
         Ok(())
+    }
+
+    pub fn set_tier_limits(
+        env: Env,
+        admin: Address,
+        tier: KycTier,
+        limits: crate::AmountLimits,
+    ) -> Result<(), MerchantError> {
+        admin.require_auth();
+        let current_admin: Address = env
+            .storage()
+            .persistent()
+            .get(&MerchantDataKey::Admin)
+            .ok_or(MerchantError::Unauthorized)?;
+
+        if admin != current_admin {
+            return Err(MerchantError::Unauthorized);
+        }
+
+        env.storage()
+            .persistent()
+            .set(&MerchantDataKey::TierLimit(tier), &limits);
+        Ok(())
+    }
+
+    pub fn get_tier_limits(env: Env, tier: KycTier) -> crate::AmountLimits {
+        env.storage()
+            .persistent()
+            .get(&MerchantDataKey::TierLimit(tier))
+            .unwrap_or(crate::AmountLimits {
+                min: None,
+                max: None,
+            })
     }
 
     /// Register a new merchant
@@ -1151,6 +1196,25 @@ impl MerchantRegistry {
     /// Only the admin can call this. Emits a `CONTRACT/UPGRADED` event on success.
     pub fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) -> Result<(), MerchantError> {
         admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .persistent()
+            .get(&MerchantDataKey::Admin)
+            .ok_or(MerchantError::Unauthorized)?;
+
+        if admin != stored_admin {
+            return Err(MerchantError::Unauthorized);
+        }
+
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
+
+        env.events().publish(
+            (Symbol::new(&env, "CONTRACT"), Symbol::new(&env, "UPGRADED")),
+            admin,
+        );
+
+        Ok(())
+    }
     /// Issue #398: Transfer MerchantRegistry admin ownership to a new address.
     ///
     /// Only the current admin may call this. Once transferred, the old admin

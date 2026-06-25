@@ -3,6 +3,10 @@
 ## [Unreleased]
 
 ### Added
+- **Issue #390**: `settle_payment` correctly handles non-empty `splits` by distributing USDC according to `SettlementSplit.amount` and handles empty splits by transferring the full net amount directly to the merchant.
+- **Issue #391**: Implemented `batch_expire_payments` for permissionless expiry sweeps up to 50 payments per call; fixed `expire_payment` to return `PaymentExpired` when attempting to expire a non-expired payment.
+- **Issue #392**: Dispute Escalation logic: implemented `escalate_expired_disputes` to flag disputes past their `review_deadline` as escalated, processing up to 20 disputes permissionlessly.
+- **Issue #393**: KYC Tier-Based Payment Limits: `MerchantRegistry` now supports `set_tier_limits` and `get_tier_limits`; `PaymentProcessor.create_payment` enforces `AmountBelowMin` and `AmountAboveMax` based on the merchant's tier limits.
 - **Issue #394**: Multi-token support — added `set_usdc_token` function to configure a default settlement token and auto-whitelist it; `settle_payment` now supports per-payment token overrides via `payment.token_address`.
 - **Issue #413**: Multi-currency invoicing for payment links — added `fiat: Option<FiatConfig>` to `create_link` with `FiatConfig { amount, currency, oracle }` and `MaybeFiatConfig` Soroban-compatible wrapper; `use_link` resolves the USDC equivalent via the FX oracle at exchange time.
 - **Issue #395**: Contract upgrade mechanism — added `upgrade` function to `FXOracle`, `MerchantRegistry`, and `PaymentLinkManager` with admin authorization and `CONTRACT/UPGRADED` event emission; enhanced `RefundManager::upgrade_contract` with version tracking and event emission.
