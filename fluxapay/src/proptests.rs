@@ -1,4 +1,6 @@
-﻿use crate::format_id;
+extern crate alloc;
+use alloc::format;
+use crate::format_id;
 use crate::utils::validate_id;
 use proptest::prelude::*;
 use soroban_sdk::{
@@ -207,7 +209,7 @@ proptest! {
         let with_bad = format!("{}{}", valid, bad_char);
         prop_assume!(with_bad.len() >= 3 && with_bad.len() <= 64);
         // Only test if the bad char is actually non-ASCII or a known disallowed ASCII char
-        let has_disallowed = with_bad.bytes().any(|b| {
+        let has_disallowed = with_bad.bytes().any(|b: u8| {
             !b.is_ascii_alphanumeric() && b != b'-' && b != b'_'
         });
         if has_disallowed {

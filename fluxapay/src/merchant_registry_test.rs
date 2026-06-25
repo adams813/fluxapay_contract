@@ -1832,8 +1832,8 @@ fn test_transfer_admin_emits_event() {
     let events = env.events().all();
     let found = events.iter().any(|(_, topics, _)| {
         if let (Ok(ns), Ok(ev)) = (
-            topics.get::<Symbol>(0).unwrap().try_into_val(&env),
-            topics.get::<Symbol>(1).unwrap().try_into_val(&env),
+            topics.get(0).unwrap().try_into_val(&env),
+            topics.get(1).unwrap().try_into_val(&env),
         ) {
             let ns: Symbol = ns;
             let ev: Symbol = ev;

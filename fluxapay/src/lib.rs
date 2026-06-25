@@ -1989,6 +1989,25 @@ impl RefundManager {
         Ok(())
     }
 
+    pub fn escalate_expired_disputes(env: Env, dispute_ids: Vec<String>) -> u32 {
+        let mut count = 0;
+        let mut i = 0;
+        let len = dispute_ids.len();
+        let max = if len > 20 { 20 } else { len };
+        
+        while i < max {
+            if let Some(dispute_id) = dispute_ids.get(i) {
+                if let Ok(mut dispute) = Self::get_dispute_internal(&env, &dispute_id) {
+                    if let Ok(true) = Self::maybe_escalate_dispute_due_to_deadline(&env, &dispute_id, &mut dispute) {
+                        count += 1;
+                    }
+                }
+            }
+            i += 1;
+        }
+        count
+    }
+
     pub fn resolve_dispute_with_refund(
         env: Env,
         operator: Address,
@@ -4456,7 +4475,7 @@ impl PaymentProcessor {
 
         Self::enforce_amount_limits(&env, &args.merchant_id, args.amount)?;
 
-        // Issue #303: Enforce KYC tier per-payment limit when merchant registry is configured
+        // Issue #393: Enforce KYC tier per-payment limit when merchant registry is configured
         if let Some(registry_address) = env
             .storage()
             .persistent()
@@ -4465,13 +4484,14 @@ impl PaymentProcessor {
             let registry_client =
                 crate::merchant_registry::MerchantRegistryClient::new(&env, &registry_address);
             if let Ok(Ok(merchant)) = registry_client.try_get_merchant(&args.merchant_id) {
-                if let Some(limits) = env
-                    .storage()
-                    .persistent()
-                    .get::<DataKey, KycTierLimits>(&DataKey::KycTierLimitsConfig)
-                {
-                    if limits.tier == merchant.kyc_tier {
-                        if args.amount > limits.max_amount {
+                if let Ok(Ok(limits)) = registry_client.try_get_tier_limits(&merchant.kyc_tier) {
+                    if let Some(min) = limits.min {
+                        if args.amount < min {
+                            return Err(Error::AmountBelowMin);
+                        }
+                    }
+                    if let Some(max) = limits.max {
+                        if args.amount > max {
                             return Err(Error::AmountAboveMax);
                         }
                     }
@@ -5143,7 +5163,7 @@ impl PaymentProcessor {
         }
 
         if env.ledger().timestamp() <= payment.expires_at {
-            return Err(Error::Unauthorized);
+            return Err(Error::PaymentExpired);
         }
 
         payment.status = PaymentStatus::Expired;
@@ -5166,6 +5186,23 @@ impl PaymentProcessor {
         );
 
         Ok(())
+    }
+
+    pub fn batch_expire_payments(env: Env, payment_ids: Vec<String>) -> u32 {
+        let mut count = 0;
+        let mut i = 0;
+        let len = payment_ids.len();
+        let max = if len > 50 { 50 } else { len };
+        
+        while i < max {
+            if let Some(payment_id) = payment_ids.get(i) {
+                if Self::expire_payment(env.clone(), payment_id).is_ok() {
+                    count += 1;
+                }
+            }
+            i += 1;
+        }
+        count
     }
 
     pub fn settle_payment(
@@ -5197,10 +5234,6 @@ impl PaymentProcessor {
 
         if payment.status != PaymentStatus::Confirmed {
             return Err(Error::PaymentAlreadyProcessed);
-        }
-
-        if splits.is_empty() {
-            return Err(Error::InvalidSettlement);
         }
 
         // Resolve the settlement token: use payment.token_address if set, else the configured USDC token
@@ -5340,16 +5373,33 @@ impl PaymentProcessor {
 
         let net_amount = net_after_settlement_fee - platform_fee;
 
-        // Verify split amounts are positive and total matches net amount after fee
-        let mut total: i128 = 0;
-        for split in splits.iter() {
-            if split.amount <= 0 {
+        if splits.is_empty() {
+            if net_amount > 0 {
+                if let Some(ref settlement_token) = settlement_token {
+                    let token_client = token::TokenClient::new(&env, settlement_token);
+                    let from = env.current_contract_address();
+                    let _ = token_client.try_transfer(&from, &payment.merchant_id, &net_amount);
+                }
+            }
+        } else {
+            let mut total: i128 = 0;
+            for split in splits.iter() {
+                if split.amount <= 0 {
+                    return Err(Error::InvalidSettlement);
+                }
+                total = total.saturating_add(split.amount);
+            }
+            if total != net_amount {
                 return Err(Error::InvalidSettlement);
             }
-            total = total.saturating_add(split.amount);
-        }
-        if total != net_amount {
-            return Err(Error::InvalidSettlement);
+            
+            if let Some(ref settlement_token) = settlement_token {
+                let token_client = token::TokenClient::new(&env, settlement_token);
+                let from = env.current_contract_address();
+                for split in splits.iter() {
+                    let _ = token_client.try_transfer(&from, &split.recipient, &split.amount);
+                }
+            }
         }
 
         // Transfer platform fee to fee_recipient using the resolved settlement token (if configured)
