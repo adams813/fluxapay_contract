@@ -26,8 +26,8 @@ For security vulnerabilities, see [SECURITY.md](SECURITY.md) instead of opening 
 
 | Tool | Version | Install |
 |---|---|---|
-| Rust (stable) | 1.78+ | `rustup toolchain install stable` |
-| wasm32 target | — | `rustup target add wasm32-unknown-unknown` |
+| Rust (pinned) | 1.85.0 | Automatically installed via `rust-toolchain.toml` |
+| wasm32 target | — | Automatically installed via `rust-toolchain.toml` |
 | Stellar CLI | 21.x | [stellar.org/docs](https://developers.stellar.org/docs/tools/developer-tools/stellar-cli) |
 | cargo-audit | latest | `cargo install cargo-audit` |
 | cargo-deny | latest | `cargo install cargo-deny` |
