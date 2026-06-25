@@ -68,6 +68,48 @@ fn test_staleness_check() {
 }
 
 #[test]
+fn test_hard_staleness_cap_despite_high_threshold() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_oracle(&env);
+
+    let oracle = Address::generate(&env);
+    client.oracle_grant_role(&admin, &Symbol::new(&env, "ORACLE"), &oracle);
+
+    // Admin sets a permissive 7-day threshold; hard cap still applies at 24 h.
+    client.set_staleness_threshold(&admin, &(7 * 86_400));
+
+    let pair = Symbol::new(&env, "USDC_NGN");
+    client.set_rate(&oracle, &pair, &1500i128, &0);
+
+    env.ledger()
+        .set_timestamp(env.ledger().timestamp() + 25 * 3600);
+
+    let result = client.try_get_rate(&pair);
+    assert_eq!(result, Err(Ok(FXOracleError::RateStale)));
+}
+
+#[test]
+fn test_circuit_breaker_rejects_rate_by_ledger_gap() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, client) = setup_oracle(&env);
+
+    let oracle = Address::generate(&env);
+    client.oracle_grant_role(&admin, &Symbol::new(&env, "ORACLE"), &oracle);
+
+    let pair = Symbol::new(&env, "USDC_NGN");
+    client.set_rate(&oracle, &pair, &1500i128, &0);
+
+    let seq_at_update = env.ledger().sequence();
+    env.ledger()
+        .set_sequence_number(seq_at_update + 17_281);
+
+    let result = client.try_get_rate(&pair);
+    assert_eq!(result, Err(Ok(FXOracleError::RateStale)));
+}
+
+#[test]
 fn test_settlement_amount_calculation() {
     let env = Env::default();
     env.mock_all_auths();

@@ -2,6 +2,12 @@ use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, 
 
 use crate::access_control::{role_admin, role_oracle, AccessControl};
 
+/// Maximum allowed age of a rate in seconds, regardless of admin-configured threshold.
+const MAX_RATE_AGE_SECS: u64 = 86_400; // 24 hours
+
+/// Maximum ledger sequence gap since last rate update (~24 h at ~5 s/ledger).
+const MAX_LEDGER_GAP: u32 = 17_280;
+
 #[contract]
 pub struct FXOracle;
 
@@ -12,6 +18,7 @@ pub struct RateData {
     pub rate: i128,
     pub decimals: u32,
     pub updated_at: u64,
+    pub updated_sequence: u32,
 }
 
 #[contracterror]
@@ -81,6 +88,7 @@ impl FXOracle {
             rate,
             decimals,
             updated_at: env.ledger().timestamp(),
+            updated_sequence: env.ledger().sequence(),
         };
 
         env.storage()
@@ -103,17 +111,54 @@ impl FXOracle {
             .get(&OracleDataKey::Rate(pair))
             .ok_or(FXOracleError::RateNotFound)?;
 
-        let threshold: u64 = env
+        Self::check_rate_freshness(&env, &rate_data, &pair)?;
+
+        Ok(rate_data)
+    }
+
+    // SECURITY: Rate freshness relies on ledger wall-clock time (`env.ledger().timestamp()`),
+    // which Stellar validators can influence within a small window (~±a few seconds).
+    // A compromised oracle key or delayed off-chain feed could also leave stale rates in
+    // storage. Mitigations enforced here:
+    //   1. Hard cap (`MAX_RATE_AGE_SECS`) — rates older than 24 h are always rejected,
+    //      even if the admin-configured threshold is higher.
+    //   2. Ledger-sequence circuit breaker (`MAX_LEDGER_GAP`) — if no rate update has
+    //      occurred within the last N ledgers, settlement is blocked and a STALE_ALERT
+    //      event is emitted for off-chain monitoring.
+    // Accepted residual risk: timestamp drift within the validator window may delay or
+    // accelerate staleness by a few seconds. A dual timestamp+sequence AND-check (reject
+    // only when both conditions hold) is tracked as a follow-up to reduce false positives.
+    fn check_rate_freshness(
+        env: &Env,
+        rate_data: &RateData,
+        pair: &Symbol,
+    ) -> Result<(), FXOracleError> {
+        let configured_threshold: u64 = env
             .storage()
             .instance()
             .get(&OracleDataKey::StalenessThreshold)
-            .unwrap_or(86400);
+            .unwrap_or(MAX_RATE_AGE_SECS);
 
-        if env.ledger().timestamp() > rate_data.updated_at + threshold {
+        let effective_threshold = configured_threshold.min(MAX_RATE_AGE_SECS);
+
+        let now = env.ledger().timestamp();
+        if now > rate_data.updated_at.saturating_add(effective_threshold) {
             return Err(FXOracleError::RateStale);
         }
 
-        Ok(rate_data)
+        let ledger_gap = env
+            .ledger()
+            .sequence()
+            .saturating_sub(rate_data.updated_sequence);
+        if ledger_gap > MAX_LEDGER_GAP {
+            env.events().publish(
+                (Symbol::new(env, "RATE"), Symbol::new(env, "STALE_ALERT")),
+                pair.clone(),
+            );
+            return Err(FXOracleError::RateStale);
+        }
+
+        Ok(())
     }
 
     pub fn get_settlement_amount(
@@ -135,7 +180,7 @@ impl FXOracle {
         env.storage()
             .instance()
             .get(&OracleDataKey::StalenessThreshold)
-            .unwrap_or(86400)
+            .unwrap_or(MAX_RATE_AGE_SECS)
     }
 
     /// Upgrade the contract WASM.
