@@ -108,7 +108,7 @@ impl FXOracle {
         let rate_data: RateData = env
             .storage()
             .persistent()
-            .get(&OracleDataKey::Rate(pair))
+            .get(&OracleDataKey::Rate(pair.clone()))
             .ok_or(FXOracleError::RateNotFound)?;
 
         Self::check_rate_freshness(&env, &rate_data, &pair)?;
