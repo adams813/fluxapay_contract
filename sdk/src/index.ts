@@ -20,11 +20,14 @@ import {
   restoreFromOfflinePayload,
 } from "./offline-signer.js";
 import { NetworkProfileSwitcher, NetworkEnvironment, NetworkProfiles, NetworkProfile } from "./network-profiles.js";
+import { FxOracleClient } from "./contracts/fx-oracle.js";
 
 export interface FluxapayConfig {
   network: NetworkEnvironment;
   rpcUrl?: string;
   contractId: string;
+  /** FX Oracle contract ID for multi-currency rate queries. */
+  oracleContractId?: string;
 }
 
 export const FLUXAPAY_CONTRACT_ERROR_MAP: Record<number, string> = {
@@ -140,8 +143,11 @@ async function withMappedContractError<T>(operation: () => Promise<T>): Promise<
 export class FluxapayClient {
   public contract: ContractClient;
   public networkSwitcher: NetworkProfileSwitcher;
+  private fxOracleClient?: FxOracleClient;
+  private readonly config: FluxapayConfig;
 
   constructor(config: FluxapayConfig) {
+    this.config = config;
     this.networkSwitcher = new NetworkProfileSwitcher(config.network);
     
     // Override RPC URL if provided, otherwise use the default for the profile
@@ -152,6 +158,28 @@ export class FluxapayClient {
       rpcUrl: rpcUrl,
       contractId: config.contractId,
     });
+  }
+
+  /**
+   * Get an FX Oracle client when `oracleContractId` was provided in config.
+   */
+  fxOracle(): FxOracleClient {
+    if (!this.config.oracleContractId) {
+      throw new Error(
+        "oracleContractId is required in FluxapayConfig to use the FX Oracle client",
+      );
+    }
+
+    if (!this.fxOracleClient) {
+      const profile = this.networkSwitcher.getProfile();
+      this.fxOracleClient = new FxOracleClient({
+        network: profile.environment,
+        rpcUrl: this.config.rpcUrl || profile.rpcUrl,
+        oracleContractId: this.config.oracleContractId,
+      });
+    }
+
+    return this.fxOracleClient;
   }
 
   /**
@@ -168,6 +196,7 @@ export class FluxapayClient {
       rpcUrl: profile.rpcUrl,
       contractId: newContractId,
     });
+    this.fxOracleClient = undefined;
   }
 
   /**
@@ -289,3 +318,10 @@ export {
 
 export { RefundManagerClient, type RefundManagerConfig } from "./contracts/refund-manager.js";
 export { MerchantRegistryClient, type MerchantRegistryConfig } from "./contracts/merchant-registry.js";
+export {
+  FxOracleClient,
+  FxOracleError,
+  type FxOracleConfig,
+  type RateData,
+  FX_ORACLE_ERROR_MAP,
+} from "./contracts/fx-oracle.js";

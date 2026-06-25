@@ -40,7 +40,7 @@ async function main() {
 
 ## Features
 
-- **High-level Wrapper**: `FluxapayClient`, `RefundManagerClient`, and `MerchantRegistryClient` simplify complex contract interactions.
+- **High-level Wrapper**: `FluxapayClient`, `RefundManagerClient`, `MerchantRegistryClient`, and `FxOracleClient` simplify complex contract interactions.
 - **Typed Interfaces**: Full TypeScript support for all contract models (`Merchant`, `Payment`, `Refund`, etc.).
 - **Automatic Simulation**: Built-in support for Soroban transaction simulation.
 - **Network Presets**: Easy switching between `testnet` and `mainnet`.
@@ -126,6 +126,74 @@ async function manageMerchant() {
   // Reinstate a suspended merchant
   await merchantClient.reinstateMerchant("G...", "merchant_001");
 }
+```
+
+## FxOracleClient
+
+The `FxOracleClient` provides methods for querying and publishing FX exchange rates. Off-chain services such as settlement processors and dashboards use it to read current rates and check staleness.
+
+### Standalone client
+
+```typescript
+import { FxOracleClient } from "@fluxapay/sdk";
+
+const oracleClient = new FxOracleClient({
+  network: "testnet",
+  rpcUrl: "https://soroban-testnet.stellar.org",
+  oracleContractId: "C...", // FX Oracle contract ID
+});
+
+async function queryRates() {
+  // Read the current rate for a currency pair
+  const rate = await oracleClient.getRate("USDCNGN");
+  console.log("Rate:", rate.rate, "decimals:", rate.decimals);
+
+  // Convert USDC to a settlement currency
+  const settlementAmount = await oracleClient.getSettlementAmount(
+    1_000_000n, // 1 USDC in stroops
+    "NGN",
+  );
+  console.log("Settlement amount:", settlementAmount);
+
+  // Check the staleness threshold (seconds)
+  const threshold = await oracleClient.getStalenessThreshold();
+  console.log("Staleness threshold:", threshold);
+}
+```
+
+### Via FluxapayClient
+
+Pass `oracleContractId` in `FluxapayConfig` to access the FX Oracle through the main client:
+
+```typescript
+import { FluxapayClient } from "@fluxapay/sdk";
+
+const client = new FluxapayClient({
+  network: "testnet",
+  contractId: "C...", // PaymentProcessor contract ID
+  oracleContractId: "C...", // FX Oracle contract ID
+});
+
+const oracle = client.fxOracle();
+const rate = await oracle.getRate("USDCNGN");
+```
+
+### Publishing rates (operator)
+
+```typescript
+// Publish a new rate (requires ORACLE role)
+await oracleClient.setRate(
+  "G...",        // operator address
+  "USDCNGN",     // pair
+  1_500_0000000n, // rate
+  7,             // decimals
+);
+
+// Update staleness threshold (requires ADMIN role)
+await oracleClient.setStalenessThreshold(
+  "G...",   // admin address
+  86_400n,  // 24 hours in seconds
+);
 ```
 
 ## License
