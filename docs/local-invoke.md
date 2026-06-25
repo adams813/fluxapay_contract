@@ -123,7 +123,7 @@ pub fn create_payment(
     deposit_address: Address,       // Where customer sends funds
     expires_at: u64,                // Unix timestamp when payment expires
     memo: Option<String>,           // Optional memo/invoice reference
-    memo_type: Option<String>,      // Optional memo type (e.g. "invoice_id", "order_id")
+    memo_type: Option<String>,      // Stellar memo type: "Text", "Id", "Hash", or "Return"
 ) -> Result<PaymentCharge, Error>
 ```
 
@@ -151,8 +151,8 @@ stellar contract invoke \
   --currency USDC \
   --deposit_address $ADMIN_ADDRESS \
   --expires_at $EXPIRES_AT \
-  --memo "Order #12345" \
-  --memo_type "order_id"
+  --memo "Order-12345-USD" \
+  --memo_type "Text"
 ```
 
 #### Expected Output
@@ -167,8 +167,8 @@ Success returns a `PaymentCharge` object:
   "status": "Pending",
   "created_at": 1711776000,
   "expires_at": 1711779600,
-  "memo": "Order #12345",
-  "memo_type": "order_id"
+  "memo": "Order-12345-USD",
+  "memo_type": "Text"
 }
 ```
 
@@ -180,6 +180,9 @@ Success returns a `PaymentCharge` object:
 | `InvalidAmount` | Amount ≤ 0 | Specify positive amount in stroops |
 | `PaymentAlreadyExists` | Payment ID already used | Use a unique payment ID |
 | `ContractPaused` | Contract is paused | Contact admin to unpause |
+| `InvalidMemoType` | `memo_type` is not one of `Text`, `Id`, `Hash`, `Return` | Use a valid Stellar memo type |
+| `MemoTooLong` | Text memo exceeds 28 bytes | Shorten the memo to ≤ 28 bytes |
+| `InvalidMemoId` | Id memo is not a valid u64 decimal string | Use a numeric string e.g. `"123456789"` |
 
 #### Field Conversion Guide
 
@@ -225,8 +228,8 @@ Returns the full `PaymentCharge` object with current status:
   "amount_received": 1000000000,
   "created_at": 1711776000,
   "expires_at": 1711779600,
-  "memo": "Order #12345",
-  "memo_type": "order_id"
+  "memo": "Order-12345-USD",
+  "memo_type": "Text"
 }
 ```
 
@@ -697,6 +700,48 @@ stellar contract invoke \
 Set `status_filter` to a `PaymentStatus` value such as `Pending` or
 `Confirmed` to paginate only matching merchant payment IDs. Use `null` to
 preserve the unfiltered behavior.
+
+### Paginated Full Payment Records (Issue #396)
+
+Fetch paginated `PaymentCharge` structs (not just IDs) for merchant dashboards.
+`limit` is silently capped at 50 per call.
+
+```bash
+# Get total count first (for pagination UI)
+stellar contract invoke \
+  --id $PAYMENT_PROCESSOR_ID \
+  --network testnet \
+  -- get_merchant_payment_count \
+  --merchant_id $TEST_MERCHANT_ADDRESS
+
+# Fetch first page of full PaymentCharge records
+stellar contract invoke \
+  --id $PAYMENT_PROCESSOR_ID \
+  --network testnet \
+  -- get_merchant_payments_full \
+  --merchant_id $TEST_MERCHANT_ADDRESS \
+  --offset 0 \
+  --limit 20
+```
+
+Returns an array of full `PaymentCharge` objects. Returns an empty array
+(not an error) when `offset` exceeds the total count.
+
+### Idempotency Window (Issue #399)
+
+Idempotency keys (`client_token`) are now stored with a TTL matching the
+payment expiry window rather than a permanent TTL. After a payment expires
+or is cancelled the key is proactively removed so the same `client_token`
+can be reused for a new payment.
+
+**Behaviour summary:**
+
+| Scenario | `client_token` reusable? |
+|----------|--------------------------|
+| Payment active (Pending) | No — `DuplicateIdempotencyKey` |
+| Same `payment_id` retry | Yes — returns existing payment |
+| Payment cancelled | Yes — key freed immediately |
+| Payment expired | Yes — key freed immediately |
 
 ### Monitor Payment Events
 

@@ -3,6 +3,13 @@
 ## [Unreleased]
 
 ### Added
+- **Issue #399** — Idempotency key TTL: `DataKey::IdempotencyKey` entries are now stored with a TTL derived from the payment expiry window (ledgers ≈ `(expires_at − now) / 5`, minimum `SHORT_LIVE_TTL`) instead of the permanent `LONG_LIVE_TTL`. A new reverse-map key `DataKey::PaymentIdempotencyToken(payment_id)` is also stored so `cancel_payment` and `expire_payment` can proactively remove the forward key, freeing the `client_token` for reuse immediately after a payment is cancelled or expired.
+- **Issue #398** — `MerchantRegistry::transfer_admin(current_admin, new_admin)`: allows the current admin to hand off registry ownership atomically. Validates stored admin matches `current_admin`, updates `MerchantDataKey::Admin`, and emits `MERCHANT_REGISTRY/ADMIN_TRANSFERRED`. Added `get_admin()` getter. Old admin loses all privileges immediately after transfer.
+- **Issue #397** — Stellar memo type validation in `create_payment`: `memo_type` must be one of `Text`, `Id`, `Hash`, or `Return`; Text memos are rejected if > 28 bytes; Id memos are rejected if not a valid `u64` decimal string. New error codes: `InvalidMemoType = 50`, `MemoTooLong = 51`, `InvalidMemoId = 52`. Validation is a no-op when `memo_type` is `None`.
+- **Issue #396** — `get_merchant_payments_full(merchant_id, offset, limit) -> Vec<PaymentCharge>`: paginated getter returning full `PaymentCharge` structs (not just IDs) with `limit` silently capped at 50. Added `get_merchant_payment_count_for_dashboard(merchant_id) -> u32` for pagination UI total-count queries. Empty result (not error) when `offset` exceeds count.
+
+### Storage key layout changes (Issue #399)
+- **New key**: `DataKey::PaymentIdempotencyToken(String)` — reverse map from `payment_id` → `client_token`; stored and removed alongside `DataKey::IdempotencyKey`. Existing `IdempotencyKey` entries written by prior contract versions carry `LONG_LIVE_TTL` and will naturally expire; new entries use payment-scoped TTLs.
 - `allow_token` unauthorized non-admin test for token allowlist enforcement (closes #328)
 - `settle_payment` tests for unauthorized operators, pending/expired rejection, and `PAYMENT/SETTLED` event emission (closes #326)
 - `get_merchant_payments_paginated` optional `status_filter` parameter to paginate merchant payments by `PaymentStatus` (closes #280)

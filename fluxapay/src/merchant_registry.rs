@@ -1145,4 +1145,51 @@ impl MerchantRegistry {
         let _ = (env, merchant_id);
         0
     }
+
+    /// Issue #398: Transfer MerchantRegistry admin ownership to a new address.
+    ///
+    /// Only the current admin may call this. Once transferred, the old admin
+    /// loses all admin privileges and the new admin is stored under
+    /// `MerchantDataKey::Admin`.
+    ///
+    /// Emits a `MERCHANT_REGISTRY / ADMIN_TRANSFERRED` event with
+    /// `(old_admin, new_admin)` as the payload.
+    pub fn transfer_admin(
+        env: Env,
+        current_admin: Address,
+        new_admin: Address,
+    ) -> Result<(), MerchantError> {
+        current_admin.require_auth();
+
+        let stored_admin: Address = env
+            .storage()
+            .persistent()
+            .get(&MerchantDataKey::Admin)
+            .ok_or(MerchantError::Unauthorized)?;
+
+        if current_admin != stored_admin {
+            return Err(MerchantError::Unauthorized);
+        }
+
+        env.storage()
+            .persistent()
+            .set(&MerchantDataKey::Admin, &new_admin);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "MERCHANT_REGISTRY"),
+                Symbol::new(&env, "ADMIN_TRANSFERRED"),
+            ),
+            (current_admin, new_admin),
+        );
+
+        Ok(())
+    }
+
+    /// Issue #398: Return the current admin address.
+    pub fn get_admin(env: Env) -> Option<Address> {
+        env.storage()
+            .persistent()
+            .get(&MerchantDataKey::Admin)
+    }
 }
