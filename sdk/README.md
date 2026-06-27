@@ -20,11 +20,12 @@ import { FluxapayClient } from "@fluxapay/sdk";
 const client = new FluxapayClient({
   network: "testnet",
   rpcUrl: "https://soroban-testnet.stellar.org",
-  contractId: "C...", // Your contract ID
+  contractId: "C...", // PaymentProcessor contract ID
+  merchantRegistryContractId: "C...", // MerchantRegistry contract ID (optional)
 });
 
 async function main() {
-  // Create a payment
+  // Create a payment with full CreatePaymentArgs support
   const payment = await client.createPayment({
     paymentId: "pay_123",
     merchantId: "G...",
@@ -32,6 +33,11 @@ async function main() {
     currency: "USDC",
     depositAddress: "G...",
     expiresAt: BigInt(Math.floor(Date.now() / 1000) + 3600),
+    durationSecs: 3600n,           // optional: alternative to expiresAt
+    memo: "Order #42",             // optional
+    memoType: "Text",              // optional: Text | Id | Hash | Return
+    tokenAddress: "C...",          // optional: custom token
+    clientToken: "idempotency-key", // optional: idempotency key
   });
 
   console.log("Payment created:", payment);
@@ -45,13 +51,108 @@ async function main() {
 ## Features
 
 - **High-level Wrapper**: `FluxapayClient`, `RefundManagerClient`, `MerchantRegistryClient`, and `FxOracleClient` simplify complex contract interactions.
-- **Typed Interfaces**: Full TypeScript support for all contract models (`Merchant`, `Payment`, `Refund`, etc.).
+- **Typed Interfaces**: Full TypeScript support for all contract models (`Merchant`, `PaymentCharge`, `Refund`, `FeeConfig`, etc.).
 - **Automatic Simulation**: Built-in support for Soroban transaction simulation.
 - **Network Presets**: Easy switching between `testnet` and `mainnet`.
 
+## Merchant Management (FluxapayClient)
+
+Register and manage merchants directly through `FluxapayClient`. Pass `merchantRegistryContractId` in config to target the dedicated MerchantRegistry contract.
+
+### Register without custom fee
+
+```typescript
+await client.registerMerchant({
+  merchantId: "G...",
+  businessName: "Acme Corp",
+  settlementCurrency: "USDC",
+  payoutAddress: "G...",
+});
+```
+
+### Register with custom FeeConfig
+
+```typescript
+import { FluxapayClient, FeeConfig } from "@fluxapay/sdk";
+
+const feeConfig: FeeConfig = {
+  platform_fee_bps: 200n,   // 2%
+  fixed_fee: 100000n,       // 0.01 USDC fixed fee
+  fee_recipient: "G...",    // optional custom recipient
+};
+
+await client.registerMerchant({
+  merchantId: "G...",
+  businessName: "Acme Corp",
+  settlementCurrency: "USDC",
+  payoutAddress: "G...",
+  feeConfig,
+});
+```
+
+### Update, verify, and query merchants
+
+```typescript
+// Update merchant settings (including fee config)
+await client.updateMerchant({
+  merchantId: "G...",
+  businessName: "Updated Corp Name",
+  settlementCurrency: "EUR",
+  feeConfig: {
+    platform_fee_bps: 150n,
+    fixed_fee: 0n,
+    fee_recipient: undefined,
+  },
+});
+
+// Verify merchant (admin only)
+await client.verifyMerchant("G...", "G..."); // admin, merchantId
+
+// Get merchant details
+const merchant = await client.getMerchant("G...");
+console.log("Merchant:", merchant);
+```
+
+## Refunds and Disputes (FluxapayClient)
+
+```typescript
+// Create a refund request
+const refundTx = await client.createRefund({
+  paymentId: "pay_123",
+  amount: 500000n,
+  reason: "Damaged goods",
+  requester: "G...",
+});
+
+// Process a pending refund (operator)
+await client.processRefund("G...", "refund_001");
+
+// Query refunds
+const refund = await client.getRefund("refund_001");
+const paymentRefunds = await client.getPaymentRefunds("pay_123");
+
+// Create a dispute
+const disputeTx = await client.createDispute({
+  paymentId: "pay_123",
+  amount: 500000n,
+  reason: "Unauthorized charge",
+  evidence: "ipfs://...",
+  disputer: "G...",
+});
+
+// Dispute lifecycle (operator)
+await client.reviewDispute("G...", "dispute_001");
+await client.resolveDisputeWithRefund("G...", "dispute_001", "Refund approved");
+// or: await client.rejectDispute("G...", "dispute_001", "Insufficient evidence");
+
+// Query disputes
+const dispute = await client.getDispute("dispute_001");
+const paymentDisputes = await client.getPaymentDisputes("pay_123");
+```
+
 ## RefundManagerClient
 
-The `RefundManagerClient` provides methods for managing refunds:
+The `RefundManagerClient` provides methods for managing refunds on a dedicated RefundManager contract:
 
 ```typescript
 import { RefundManagerClient } from "@fluxapay/sdk";
@@ -63,78 +164,63 @@ const refundClient = new RefundManagerClient({
 });
 
 async function handleRefund() {
-  // Create a refund request
   const refundId = await refundClient.createRefund(
-    "payment_123",     // paymentId
-    500000n,           // refundAmount in stroops
-    "Damaged goods",   // reason
-    "G...",            // requester address
+    "payment_123",
+    500000n,
+    "Damaged goods",
+    "G...",
   );
 
-  console.log("Refund created:", refundId);
-
-  // Get refund details
   const refund = await refundClient.getRefund(refundId);
-  console.log("Refund status:", refund.status);
-
-  // Process the refund
-  await refundClient.processRefund("G...", refundId); // operator, refundId
-
-  // Get all refunds for a payment
+  await refundClient.processRefund("G...", refundId);
   const allRefunds = await refundClient.getPaymentRefunds("payment_123");
-  console.log("Payment refunds:", allRefunds);
 }
 ```
 
 ## MerchantRegistryClient
 
-The `MerchantRegistryClient` provides methods for managing merchant registrations:
+The standalone `MerchantRegistryClient` is also available for direct registry access:
 
 ```typescript
-import { MerchantRegistryClient } from "@fluxapay/sdk";
+import { MerchantRegistryClient, FeeConfig } from "@fluxapay/sdk";
 
 const merchantClient = new MerchantRegistryClient({
   network: "testnet",
   rpcUrl: "https://soroban-testnet.stellar.org",
-  contractId: "C...", // MerchantRegistry contract ID
+  contractId: "C...",
 });
 
-async function manageMerchant() {
-  // Register a new merchant
-  await merchantClient.registerMerchant(
-    "merchant_001",      // merchantId
-    "Acme Corp",         // businessName
-    "USDC",              // settlementCurrency
-  );
+// Without fee config
+await merchantClient.registerMerchant({
+  merchantId: "merchant_001",
+  businessName: "Acme Corp",
+  settlementCurrency: "USDC",
+});
 
-  console.log("Merchant registered");
+// With fee config
+const feeConfig: FeeConfig = {
+  platform_fee_bps: 100n,
+  fixed_fee: 50000n,
+  fee_recipient: undefined,
+};
 
-  // Get merchant details
-  const merchant = await merchantClient.getMerchant("merchant_001");
-  console.log("Merchant:", merchant);
+await merchantClient.registerMerchant({
+  merchantId: "merchant_002",
+  businessName: "Beta Inc",
+  settlementCurrency: "USDC",
+  feeConfig,
+});
 
-  // Verify the merchant
-  await merchantClient.verifyMerchant("G...", "merchant_001"); // operator, merchantId
-
-  // Update merchant information
-  await merchantClient.updateMerchant(
-    "G...",              // operator
-    "merchant_001",      // merchantId
-    "Updated Corp Name", // new businessName
-    "EUR",               // new settlementCurrency
-  );
-
-  // Suspend a merchant if needed
-  await merchantClient.suspendMerchant("G...", "merchant_001");
-
-  // Reinstate a suspended merchant
-  await merchantClient.reinstateMerchant("G...", "merchant_001");
-}
+await merchantClient.verifyMerchant("G...", "merchant_001");
+await merchantClient.updateMerchant({
+  merchantId: "merchant_001",
+  businessName: "Updated Corp Name",
+});
 ```
 
 ## FxOracleClient
 
-The `FxOracleClient` provides methods for querying and publishing FX exchange rates. Off-chain services such as settlement processors and dashboards use it to read current rates and check staleness.
+The `FxOracleClient` provides methods for querying and publishing FX exchange rates.
 
 ### Standalone client
 
@@ -144,60 +230,24 @@ import { FxOracleClient } from "@fluxapay/sdk";
 const oracleClient = new FxOracleClient({
   network: "testnet",
   rpcUrl: "https://soroban-testnet.stellar.org",
-  oracleContractId: "C...", // FX Oracle contract ID
+  oracleContractId: "C...",
 });
 
-async function queryRates() {
-  // Read the current rate for a currency pair
-  const rate = await oracleClient.getRate("USDCNGN");
-  console.log("Rate:", rate.rate, "decimals:", rate.decimals);
-
-  // Convert USDC to a settlement currency
-  const settlementAmount = await oracleClient.getSettlementAmount(
-    1_000_000n, // 1 USDC in stroops
-    "NGN",
-  );
-  console.log("Settlement amount:", settlementAmount);
-
-  // Check the staleness threshold (seconds)
-  const threshold = await oracleClient.getStalenessThreshold();
-  console.log("Staleness threshold:", threshold);
-}
+const rate = await oracleClient.getRate("USDCNGN");
+const settlementAmount = await oracleClient.getSettlementAmount(1_000_000n, "NGN");
 ```
 
 ### Via FluxapayClient
 
-Pass `oracleContractId` in `FluxapayConfig` to access the FX Oracle through the main client:
-
 ```typescript
-import { FluxapayClient } from "@fluxapay/sdk";
-
 const client = new FluxapayClient({
   network: "testnet",
-  contractId: "C...", // PaymentProcessor contract ID
-  oracleContractId: "C...", // FX Oracle contract ID
+  contractId: "C...",
+  oracleContractId: "C...",
 });
 
 const oracle = client.fxOracle();
 const rate = await oracle.getRate("USDCNGN");
-```
-
-### Publishing rates (operator)
-
-```typescript
-// Publish a new rate (requires ORACLE role)
-await oracleClient.setRate(
-  "G...",        // operator address
-  "USDCNGN",     // pair
-  1_500_0000000n, // rate
-  7,             // decimals
-);
-
-// Update staleness threshold (requires ADMIN role)
-await oracleClient.setStalenessThreshold(
-  "G...",   // admin address
-  86_400n,  // 24 hours in seconds
-);
 ```
 
 ## License

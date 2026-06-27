@@ -1,10 +1,29 @@
 import { NetworkProfileSwitcher, NetworkEnvironment } from "../network-profiles.js";
-import { withMappedContractError } from "../index.js";
+import { withMappedContractError, FeeConfig } from "../index.js";
 
 export interface MerchantRegistryConfig {
   network: NetworkEnvironment;
   rpcUrl?: string;
   contractId: string;
+}
+
+export interface RegisterMerchantParams {
+  merchantId: string;
+  businessName: string;
+  settlementCurrency: string;
+  payoutAddress?: string;
+  bankAccount?: string;
+  feeConfig?: FeeConfig;
+}
+
+export interface UpdateMerchantParams {
+  merchantId: string;
+  businessName?: string;
+  settlementCurrency?: string;
+  active?: boolean;
+  payoutAddress?: string;
+  bankAccount?: string;
+  feeConfig?: FeeConfig;
 }
 
 /**
@@ -45,8 +64,6 @@ export class MerchantRegistryClient {
 
   /**
    * Switch the client to a different network environment.
-   * @param environment - The target network environment (e.g., 'testnet', 'mainnet')
-   * @param contractId - Optional contract ID for the new network
    */
   public switchNetwork(environment: NetworkEnvironment, contractId?: string): void {
     this.networkSwitcher.switchEnvironment(environment);
@@ -61,31 +78,22 @@ export class MerchantRegistryClient {
 
   /**
    * Register a new merchant in the registry.
-   * @param merchantId - The unique identifier for the merchant
-   * @param businessName - The name of the merchant's business
-   * @param settlementCurrency - The preferred settlement currency (e.g., 'USDC')
-   * @returns A promise that resolves when the merchant is registered
-   * @throws Error if registration fails
    */
-  async registerMerchant(
-    merchantId: string,
-    businessName: string,
-    settlementCurrency: string,
-  ): Promise<void> {
+  async registerMerchant(params: RegisterMerchantParams): Promise<void> {
     return withMappedContractError(() =>
       this.getContract().register_merchant({
-        merchant_id: merchantId,
-        business_name: businessName,
-        settlement_currency: settlementCurrency,
+        merchant_id: params.merchantId,
+        business_name: params.businessName,
+        settlement_currency: params.settlementCurrency,
+        payout_address: params.payoutAddress,
+        bank_account: params.bankAccount,
+        fee_config: params.feeConfig,
       }),
     );
   }
 
   /**
    * Retrieve details of a specific merchant.
-   * @param merchantId - The ID of the merchant to retrieve
-   * @returns A promise resolving to the merchant details
-   * @throws Error if the merchant is not found
    */
   async getMerchant(merchantId: string): Promise<any> {
     return withMappedContractError(() =>
@@ -96,36 +104,24 @@ export class MerchantRegistryClient {
   }
 
   /**
-   * Update merchant details such as business name or settlement currency.
-   * @param operator - The address authorized to update merchant information
-   * @param merchantId - The ID of the merchant to update
-   * @param businessName - The new business name (optional)
-   * @param settlementCurrency - The new settlement currency (optional)
-   * @returns A promise that resolves when the merchant is updated
-   * @throws Error if the update fails
+   * Update merchant details.
    */
-  async updateMerchant(
-    operator: string,
-    merchantId: string,
-    businessName?: string,
-    settlementCurrency?: string,
-  ): Promise<void> {
+  async updateMerchant(params: UpdateMerchantParams): Promise<void> {
     return withMappedContractError(() =>
       this.getContract().update_merchant({
-        operator: operator,
-        merchant_id: merchantId,
-        business_name: businessName || undefined,
-        settlement_currency: settlementCurrency || undefined,
+        merchant_id: params.merchantId,
+        business_name: params.businessName,
+        settlement_currency: params.settlementCurrency,
+        active: params.active,
+        payout_address: params.payoutAddress,
+        bank_account: params.bankAccount,
+        fee_config: params.feeConfig,
       }),
     );
   }
 
   /**
    * Suspend a merchant account, preventing further transactions.
-   * @param operator - The address authorized to suspend merchants
-   * @param merchantId - The ID of the merchant to suspend
-   * @returns A promise that resolves when the merchant is suspended
-   * @throws Error if suspension fails
    */
   async suspendMerchant(operator: string, merchantId: string): Promise<void> {
     return withMappedContractError(() =>
@@ -138,10 +134,6 @@ export class MerchantRegistryClient {
 
   /**
    * Reinstate a suspended merchant account.
-   * @param operator - The address authorized to reinstate merchants
-   * @param merchantId - The ID of the merchant to reinstate
-   * @returns A promise that resolves when the merchant is reinstated
-   * @throws Error if reinstatement fails
    */
   async reinstateMerchant(operator: string, merchantId: string): Promise<void> {
     return withMappedContractError(() =>
@@ -154,15 +146,11 @@ export class MerchantRegistryClient {
 
   /**
    * Verify a merchant's KYC status, enabling higher transaction limits.
-   * @param operator - The address authorized to verify merchants
-   * @param merchantId - The ID of the merchant to verify
-   * @returns A promise that resolves when the merchant is verified
-   * @throws Error if verification fails
    */
   async verifyMerchant(operator: string, merchantId: string): Promise<void> {
     return withMappedContractError(() =>
       this.getContract().verify_merchant({
-        operator: operator,
+        admin: operator,
         merchant_id: merchantId,
       }),
     );
