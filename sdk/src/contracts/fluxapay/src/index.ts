@@ -41,6 +41,32 @@ export type AccessControlDataKey =
   | { tag: "Role"; values: readonly [string, string] }
   | { tag: "Admin"; values: void };
 
+export interface FeeConfig {
+  platform_fee_bps: i64;
+  fixed_fee: i128;
+  fee_recipient: Option<string>;
+}
+
+export type MaybeFeeConfig =
+  | { tag: "None"; values: void }
+  | { tag: "Some"; values: readonly [FeeConfig] };
+
+export interface CreatePaymentArgs {
+  payment_id: string;
+  merchant_id: string;
+  amount: i128;
+  currency: string;
+  deposit_address: string;
+  expires_at: Option<u64>;
+  duration_secs: Option<u64>;
+  memo: Option<string>;
+  memo_type: Option<string>;
+  token_address: Option<string>;
+  client_token: Option<string>;
+  metadata_hash: Option<Buffer>;
+  metadata: Option<Record<string, string>>;
+}
+
 export interface Merchant {
   active: boolean;
   business_name: string;
@@ -48,6 +74,7 @@ export interface Merchant {
   merchant_id: string;
   settlement_currency: string;
   verified: boolean;
+  fee_config?: MaybeFeeConfig;
 }
 
 export const MerchantError = {
@@ -182,11 +209,17 @@ export interface Client {
       business_name,
       settlement_currency,
       active,
+      payout_address,
+      bank_account,
+      fee_config,
     }: {
       merchant_id: string;
       business_name: Option<string>;
       settlement_currency: Option<string>;
       active: Option<boolean>;
+      payout_address: Option<string>;
+      bank_account: Option<string>;
+      fee_config: Option<FeeConfig>;
     },
     options?: MethodOptions,
   ) => Promise<AssembledTransaction<Result<void>>>;
@@ -209,10 +242,16 @@ export interface Client {
       merchant_id,
       business_name,
       settlement_currency,
+      payout_address,
+      bank_account,
+      fee_config,
     }: {
       merchant_id: string;
       business_name: string;
       settlement_currency: string;
+      payout_address: Option<string>;
+      bank_account: Option<string>;
+      fee_config: Option<FeeConfig>;
     },
     options?: MethodOptions,
   ) => Promise<AssembledTransaction<Result<void>>>;
@@ -343,21 +382,7 @@ export interface Client {
    * Construct and simulate a create_payment transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
    */
   create_payment: (
-    {
-      payment_id,
-      merchant_id,
-      amount,
-      currency,
-      deposit_address,
-      expires_at,
-    }: {
-      payment_id: string;
-      merchant_id: string;
-      amount: i128;
-      currency: string;
-      deposit_address: string;
-      expires_at: u64;
-    },
+    args: CreatePaymentArgs,
     options?: MethodOptions,
   ) => Promise<AssembledTransaction<Result<PaymentCharge>>>;
 

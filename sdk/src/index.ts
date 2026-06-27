@@ -7,6 +7,9 @@ import {
   PaymentStatus,
   RefundStatus,
   DisputeStatus,
+  FeeConfig,
+  MaybeFeeConfig,
+  CreatePaymentArgs,
 } from "./contracts/fluxapay/src/index.js";
 import { Networks } from "@stellar/stellar-sdk";
 import {
@@ -21,6 +24,7 @@ import {
 } from "./offline-signer.js";
 import { NetworkProfileSwitcher, NetworkEnvironment, NetworkProfiles, NetworkProfile } from "./network-profiles.js";
 import { FxOracleClient } from "./contracts/fx-oracle.js";
+import { MerchantRegistryClient } from "./contracts/merchant-registry.js";
 
 export interface FluxapayConfig {
   network: NetworkEnvironment;
@@ -28,6 +32,41 @@ export interface FluxapayConfig {
   contractId: string;
   /** FX Oracle contract ID for multi-currency rate queries. */
   oracleContractId?: string;
+  /** MerchantRegistry contract ID for merchant management operations. */
+  merchantRegistryContractId?: string;
+}
+
+export interface CreatePaymentParams {
+  paymentId: string;
+  merchantId: string;
+  amount: bigint;
+  currency: string;
+  depositAddress: string;
+  expiresAt?: bigint;
+  durationSecs?: bigint;
+  memo?: string;
+  memoType?: string;
+  tokenAddress?: string;
+  clientToken?: string;
+}
+
+export interface RegisterMerchantParams {
+  merchantId: string;
+  businessName: string;
+  settlementCurrency: string;
+  payoutAddress?: string;
+  bankAccount?: string;
+  feeConfig?: FeeConfig;
+}
+
+export interface UpdateMerchantParams {
+  merchantId: string;
+  businessName?: string;
+  settlementCurrency?: string;
+  active?: boolean;
+  payoutAddress?: string;
+  bankAccount?: string;
+  feeConfig?: FeeConfig;
 }
 
 export const FLUXAPAY_CONTRACT_ERROR_MAP: Record<number, string> = {
@@ -140,24 +179,61 @@ async function withMappedContractError<T>(operation: () => Promise<T>): Promise<
   }
 }
 
+function toCreatePaymentArgs(params: CreatePaymentParams): CreatePaymentArgs {
+  return {
+    payment_id: params.paymentId,
+    merchant_id: params.merchantId,
+    amount: params.amount,
+    currency: params.currency,
+    deposit_address: params.depositAddress,
+    expires_at: params.expiresAt,
+    duration_secs: params.durationSecs,
+    memo: params.memo,
+    memo_type: params.memoType,
+    token_address: params.tokenAddress,
+    client_token: params.clientToken,
+    metadata_hash: undefined,
+    metadata: undefined,
+  };
+}
+
 export class FluxapayClient {
   public contract: ContractClient;
   public networkSwitcher: NetworkProfileSwitcher;
   private fxOracleClient?: FxOracleClient;
+  private merchantRegistryClient?: MerchantRegistryClient;
   private readonly config: FluxapayConfig;
 
   constructor(config: FluxapayConfig) {
     this.config = config;
     this.networkSwitcher = new NetworkProfileSwitcher(config.network);
-    
-    // Override RPC URL if provided, otherwise use the default for the profile
+
     const rpcUrl = config.rpcUrl || this.networkSwitcher.getProfile().rpcUrl;
-    
+
     this.contract = new ContractClient({
       networkPassphrase: this.networkSwitcher.getProfile().networkPassphrase,
       rpcUrl: rpcUrl,
       contractId: config.contractId,
     });
+  }
+
+  private getMerchantRegistry(): MerchantRegistryClient {
+    if (!this.config.merchantRegistryContractId) {
+      throw new Error(
+        "merchantRegistryContractId is required in FluxapayConfig for merchant registry operations",
+      );
+    }
+
+    if (!this.merchantRegistryClient) {
+      const profile = this.networkSwitcher.getProfile();
+      this.merchantRegistryClient = new MerchantRegistryClient({
+        network: profile.environment,
+        rpcUrl: this.config.rpcUrl || profile.rpcUrl,
+        contractId: this.config.merchantRegistryContractId,
+      });
+    }
+
+    return this.merchantRegistryClient;
   }
 
   /**
@@ -190,35 +266,22 @@ export class FluxapayClient {
     this.networkSwitcher.switchEnvironment(environment);
     const profile = this.networkSwitcher.getProfile();
     const newContractId = contractId || profile.defaultContractId || this.contract.options.contractId;
-    
+
     this.contract = new ContractClient({
       networkPassphrase: profile.networkPassphrase,
       rpcUrl: profile.rpcUrl,
       contractId: newContractId,
     });
     this.fxOracleClient = undefined;
+    this.merchantRegistryClient = undefined;
   }
 
   /**
    * Create a new payment charge
    */
-  async createPayment(params: {
-    paymentId: string;
-    merchantId: string;
-    amount: bigint;
-    currency: string;
-    depositAddress: string;
-    expiresAt: bigint;
-  }) {
+  async createPayment(params: CreatePaymentParams) {
     return withMappedContractError(() =>
-      this.contract.create_payment({
-        payment_id: params.paymentId,
-        merchant_id: params.merchantId,
-        amount: params.amount,
-        currency: params.currency,
-        deposit_address: params.depositAddress,
-        expires_at: params.expiresAt,
-      }),
+      this.contract.create_payment(toCreatePaymentArgs(params)),
     );
   }
 
@@ -244,6 +307,78 @@ export class FluxapayClient {
   }
 
   /**
+   * Register a new merchant in the MerchantRegistry contract
+   */
+  async registerMerchant(params: RegisterMerchantParams) {
+    if (this.config.merchantRegistryContractId) {
+      return this.getMerchantRegistry().registerMerchant(params);
+    }
+
+    return withMappedContractError(() =>
+      this.contract.register_merchant({
+        merchant_id: params.merchantId,
+        business_name: params.businessName,
+        settlement_currency: params.settlementCurrency,
+        payout_address: params.payoutAddress,
+        bank_account: params.bankAccount,
+        fee_config: params.feeConfig,
+      }),
+    );
+  }
+
+  /**
+   * Update merchant settings in the MerchantRegistry contract
+   */
+  async updateMerchant(params: UpdateMerchantParams) {
+    if (this.config.merchantRegistryContractId) {
+      return this.getMerchantRegistry().updateMerchant(params);
+    }
+
+    return withMappedContractError(() =>
+      this.contract.update_merchant({
+        merchant_id: params.merchantId,
+        business_name: params.businessName,
+        settlement_currency: params.settlementCurrency,
+        active: params.active,
+        payout_address: params.payoutAddress,
+        bank_account: params.bankAccount,
+        fee_config: params.feeConfig,
+      }),
+    );
+  }
+
+  /**
+   * Get merchant details
+   */
+  async getMerchant(merchantId: string) {
+    if (this.config.merchantRegistryContractId) {
+      return this.getMerchantRegistry().getMerchant(merchantId);
+    }
+
+    return withMappedContractError(() =>
+      this.contract.get_merchant({
+        merchant_id: merchantId,
+      }),
+    );
+  }
+
+  /**
+   * Verify a merchant (admin only)
+   */
+  async verifyMerchant(admin: string, merchantId: string) {
+    if (this.config.merchantRegistryContractId) {
+      return this.getMerchantRegistry().verifyMerchant(admin, merchantId);
+    }
+
+    return withMappedContractError(() =>
+      this.contract.verify_merchant({
+        admin,
+        merchant_id: merchantId,
+      }),
+    );
+  }
+
+  /**
    * Create a refund request
    */
   async createRefund(params: {
@@ -263,12 +398,120 @@ export class FluxapayClient {
   }
 
   /**
-   * Get merchant details
+   * Process a pending refund
    */
-  async getMerchant(merchantId: string) {
+  async processRefund(operator: string, refundId: string) {
     return withMappedContractError(() =>
-      this.contract.get_merchant({
-        merchant_id: merchantId,
+      this.contract.process_refund({
+        operator,
+        refund_id: refundId,
+      }),
+    );
+  }
+
+  /**
+   * Get refund details by ID
+   */
+  async getRefund(refundId: string) {
+    return withMappedContractError(() =>
+      this.contract.get_refund({
+        refund_id: refundId,
+      }),
+    );
+  }
+
+  /**
+   * Get all refunds for a payment
+   */
+  async getPaymentRefunds(paymentId: string) {
+    return withMappedContractError(() =>
+      this.contract.get_payment_refunds({
+        payment_id: paymentId,
+      }),
+    );
+  }
+
+  /**
+   * Create a dispute for a payment
+   */
+  async createDispute(params: {
+    paymentId: string;
+    amount: bigint;
+    reason: string;
+    evidence: string;
+    disputer: string;
+  }) {
+    return withMappedContractError(() =>
+      this.contract.create_dispute({
+        payment_id: params.paymentId,
+        amount: params.amount,
+        reason: params.reason,
+        evidence: params.evidence,
+        disputer: params.disputer,
+      }),
+    );
+  }
+
+  /**
+   * Move a dispute to under-review status
+   */
+  async reviewDispute(operator: string, disputeId: string) {
+    return withMappedContractError(() =>
+      this.contract.review_dispute({
+        operator,
+        dispute_id: disputeId,
+      }),
+    );
+  }
+
+  /**
+   * Resolve a dispute by issuing a refund
+   */
+  async resolveDisputeWithRefund(
+    operator: string,
+    disputeId: string,
+    notes: string,
+  ) {
+    return withMappedContractError(() =>
+      this.contract.resolve_dispute_with_refund({
+        operator,
+        dispute_id: disputeId,
+        resolution_notes: notes,
+      }),
+    );
+  }
+
+  /**
+   * Reject a dispute
+   */
+  async rejectDispute(operator: string, disputeId: string, notes: string) {
+    return withMappedContractError(() =>
+      this.contract.reject_dispute({
+        operator,
+        dispute_id: disputeId,
+        resolution_notes: notes,
+      }),
+    );
+  }
+
+  /**
+   * Get dispute details by ID
+   */
+  async getDispute(disputeId: string) {
+    return withMappedContractError(() =>
+      this.contract.get_dispute({
+        dispute_id: disputeId,
+      }),
+    );
+  }
+
+  /**
+   * Get all disputes for a payment
+   */
+  async getPaymentDisputes(paymentId: string) {
+    return withMappedContractError(() =>
+      this.contract.get_payment_disputes({
+        payment_id: paymentId,
       }),
     );
   }
@@ -302,6 +545,9 @@ export {
   PaymentStatus,
   RefundStatus,
   DisputeStatus,
+  FeeConfig,
+  MaybeFeeConfig,
+  CreatePaymentArgs,
   FluxapayOfflineSigner,
   OfflineTransactionPayload,
   buildOfflinePayload,
